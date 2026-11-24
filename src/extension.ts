@@ -41,6 +41,7 @@ import { ReviewDecisionTracker } from "./poll/ReviewDecisionTracker";
 import type { IPrFile, IPrFilePatch, IPullRequest } from "./core/types";
 
 const BRIEF_CACHE_STATE_KEY = "githubControlCenter.briefCache";
+const IMAGE_PIXELATED_STATE_KEY = "githubControlCenter.imageViewer.pixelated";
 // config sections that feed the poll pipeline: an event touching only ai.* keys skips the poll
 const NON_AI_SECTIONS = ["badge", "notifications", "mutedRepos", "toReview", "updateBranch", "files"].map(
   (section) => `githubControlCenter.${section}`,
@@ -252,7 +253,19 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  const imagePreview = new PrImagePreview(async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha));
+  function getImagePixelated(): boolean {
+    return context.globalState.get<boolean>(IMAGE_PIXELATED_STATE_KEY, true);
+  }
+
+  function setImagePixelated(value: boolean): void {
+    void context.globalState.update(IMAGE_PIXELATED_STATE_KEY, value);
+  }
+
+  const imagePreview = new PrImagePreview(
+    async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha),
+    undefined,
+    { get: getImagePixelated, set: setImagePixelated },
+  );
 
   async function openFileDiff(node: IFileNode, forceText = false): Promise<void> {
     const { pr, file } = node;
@@ -333,7 +346,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const newPrTracker = new NewPrTracker();
   const reviewDecisionTracker = new ReviewDecisionTracker();
   const approvalOverlay = new ApprovalOverlay();
-  const detailsPanel = new PrDetailsPanel(context.extensionUri);
+  const detailsPanel = new PrDetailsPanel(context.extensionUri, getImagePixelated);
   // repos seen in the last raw snapshot (pre-filter, so muted ones stay unmutable from the picker)
   let knownRepos = new Set<string>();
   // results are pinned to the head oid — a push invalidates naturally. Hydrated from globalState
@@ -521,6 +534,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return choice === action;
     },
     log: (message) => output.appendLine(message),
+    setImagePixelated,
   });
 
   detailsPanel.onMessage((message) => detailsSession.handleMessage(message));

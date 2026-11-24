@@ -107,6 +107,7 @@ function buildDeps() {
     notify: { info: vi.fn(), warning: vi.fn(), error: vi.fn() },
     promptModal: vi.fn().mockResolvedValue(true),
     log: vi.fn(),
+    setImagePixelated: vi.fn(),
   };
 }
 
@@ -789,5 +790,25 @@ describe("DetailsSession image resolution", () => {
     expect(deps.panel.postImageResolution).toHaveBeenCalledWith({
       requestId: "large", url: src, message: "The image exceeds the 10 MB preview limit.",
     });
+  });
+
+  it("persists setPixelated preference even before PR details load or while a mutation is in flight", async () => {
+    const deps = buildDeps();
+    let resolveComment: () => void = () => undefined;
+    deps.addPrComment.mockImplementation(() => new Promise<void>((resolve) => {
+      resolveComment = resolve;
+    }));
+    const session = new DetailsSession(deps);
+
+    session.handleMessage({ command: "setPixelated", value: false });
+    expect(deps.setImagePixelated).toHaveBeenCalledExactlyOnceWith(false);
+
+    await session.openPrDetails(buildPr());
+    session.handleMessage({ command: "comment", text: "hi" });
+    session.handleMessage({ command: "setPixelated", value: true });
+    expect(deps.setImagePixelated).toHaveBeenNthCalledWith(2, true);
+
+    resolveComment();
+    await flush();
   });
 });

@@ -11,6 +11,7 @@ export type IPanelMessage =
   | { command: "checkout" }
   | { command: "brief" }
   | { command: "resolveImage"; src: string; requestId: string }
+  | { command: "setPixelated"; value: boolean }
   | { command: "composerState"; hasText: boolean };
 
 export interface IImageResolution {
@@ -28,7 +29,10 @@ export class PrDetailsPanel {
   private panel: vscode.WebviewPanel | undefined;
   private messageHandler: ((message: IPanelMessage) => void) | undefined;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly getPixelated: () => boolean = () => true,
+  ) {}
 
   onMessage(handler: (message: IPanelMessage) => void): void {
     this.messageHandler = handler;
@@ -76,7 +80,15 @@ export class PrDetailsPanel {
       .getConfiguration("githubControlCenter")
       .get<UpdateBranchMethod>("updateBranch.defaultMethod", "REBASE");
     panel.title = formatPrTabTitle(details);
-    panel.webview.html = renderPrDetailsHtml(details, crypto.randomUUID(), Date.now(), mermaidScriptUri, defaultUpdateMethod, brief);
+    panel.webview.html = renderPrDetailsHtml(
+      details,
+      crypto.randomUUID(),
+      Date.now(),
+      mermaidScriptUri,
+      defaultUpdateMethod,
+      brief,
+      this.getPixelated(),
+    );
   }
 
   private render(title: string, html: string): void {

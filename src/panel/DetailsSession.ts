@@ -56,9 +56,10 @@ export interface IDetailsSessionDeps {
   /** wraps a modal confirmation; resolves true only when the user picked `action` */
   promptModal(message: string, action: string): Promise<boolean>;
   log(message: string): void;
+  setImagePixelated?(value: boolean): void;
 }
 
-type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | "resolveImage" }>;
+type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | "resolveImage" | "setPixelated" }>;
 
 /**
  * Owns the open PR-details-panel state: which PR is showing, its details/brief pairing, the
@@ -192,6 +193,12 @@ export class DetailsSession {
   handleMessage(message: IPanelMessage): void {
     if (message.command === "composerState") {
       this.composerHasText = message.hasText;
+      return;
+    }
+    if (message.command === "setPixelated") {
+      if (typeof message.value === "boolean") {
+        this.deps.setImagePixelated?.(message.value);
+      }
       return;
     }
     const pr = this.currentDetailsPr;

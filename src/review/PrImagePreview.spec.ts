@@ -49,9 +49,11 @@ function mockPanel(): IMockPanel {
 
 function lastSnapshot(panel: IMockPanel): IImagePreviewSnapshot {
   const calls = panel.webview.postMessage.mock.calls;
-  const last = calls[calls.length - 1]?.[0] as { command: string; snapshot: IImagePreviewSnapshot };
+  const last = [...calls].reverse().find(([payload]) => (payload as { command?: string })?.command === "state")?.[0] as
+    | { command: string; snapshot: IImagePreviewSnapshot }
+    | undefined;
   expect(last?.command).toBe("state");
-  return last.snapshot;
+  return last!.snapshot;
 }
 
 describe("imageMimeType", () => {
@@ -137,7 +139,8 @@ describe("PrImagePreview", () => {
     panel.webview.postMessage.mockClear();
 
     panel.webview.emitMessage({ command: "ready" });
-    expect(panel.webview.postMessage).toHaveBeenCalledOnce();
+    expect(panel.webview.postMessage).toHaveBeenCalledTimes(2);
+    expect(panel.webview.postMessage).toHaveBeenCalledWith({ command: "pixelated", value: true });
     const snap = lastSnapshot(panel);
     expect(snap.sides.every((s) => s.status === "ready")).toBe(true);
   });
@@ -303,5 +306,44 @@ describe("PrImagePreview", () => {
     expect(html).toContain("cursor: grab;");
     expect(html).not.toContain("cursor: zoom-in");
     expect(html).not.toContain("crisp-edges");
+    expect(html).not.toContain("maybeAutoPixelate");
+    expect(html).toContain('"pixelated":true');
+    expect(html).toMatch(/id="a-pixel"[^>]*aria-pressed="true"/);
+  });
+
+  it("defaults to nearest-neighbor, persists preference across new panels, and broadcasts changes to open panels", async () => {
+    let saved = true;
+    const preference = {
+      get: vi.fn(() => saved),
+      set: vi.fn((value: boolean) => {
+        saved = value;
+      }),
+    };
+    const panelA = mockPanel();
+    const read = vi.fn().mockResolvedValue(svgFile);
+    const preview = new PrImagePreview(read, undefined, preference);
+
+    await preview.open(change);
+    expect(panelA.webview.html).toContain('"pixelated":true');
+
+    const panelB = mockPanel();
+    await preview.open({ ...change, key: "pr:other", title: "other.png (PR #42)" });
+    expect(panelB.webview.html).toContain('"pixelated":true');
+
+    // User turns off nearest-neighbor on panelA -> preference updates and panelB syncs
+    panelA.webview.postMessage.mockClear();
+    panelB.webview.postMessage.mockClear();
+    panelA.webview.emitMessage({ command: "setPixelated", value: false });
+
+    expect(preference.set).toHaveBeenCalledWith(false);
+    expect(saved).toBe(false);
+    expect(panelA.webview.postMessage).not.toHaveBeenCalled();
+    expect(panelB.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
+
+    // Opening a third image (or a new PrImagePreview instance) keeps the persisted false state
+    const panelC = mockPanel();
+    await preview.open({ ...change, key: "pr:third", title: "large.png (PR #42)" });
+    expect(panelC.webview.html).toContain('"pixelated":false');
+    expect(panelC.webview.html).toMatch(/id="a-pixel"[^>]*aria-pressed="false"/);
   });
 });

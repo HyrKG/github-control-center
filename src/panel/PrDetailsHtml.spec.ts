@@ -929,6 +929,12 @@ describe("inline image lightbox", () => {
     expect(html).toContain("cursor: pointer;");
     expect(html).not.toContain("cursor: zoom-in");
     expect(html).not.toContain("crisp-edges");
+    expect(html).toContain('class="lb-stage ghcc-surface pixelated"');
+    expect(html).toMatch(/id="lb-pixel"[^>]*aria-pressed="true"/);
+
+    const smoothHtml = renderPrDetailsHtml(buildDetails(), NONCE, NOW, undefined, "REBASE", undefined, false);
+    expect(smoothHtml).toContain('class="lb-stage ghcc-surface"');
+    expect(smoothHtml).toMatch(/id="lb-pixel"[^>]*aria-pressed="false"/);
   });
 
   it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", () => {
@@ -1119,11 +1125,12 @@ describe("inline image lightbox", () => {
       comment: commentBtn,
     };
 
+    const postMessage = vi.fn();
     const docListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
     const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
 
     runInNewContext(script, {
-      acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage: vi.fn() }),
+      acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage }),
       crypto: { randomUUID: () => "req-1" },
       setTimeout,
       clearTimeout,
@@ -1182,15 +1189,30 @@ describe("inline image lightbox", () => {
     lbStage.emit("click", { target: lbStage, clientX: 10, clientY: 10 });
     expect(lbEl.classList.contains("open")).toBe(true);
 
-    // Next image with unsafe javascript: anchor + data: src falls back to prUrl
+    // Default is nearest-neighbor; toggling off persists via setPixelated and stays off across lbNext & reopen
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("true");
+    lbPixel.emit("click", {});
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+    expect(postMessage).toHaveBeenCalledWith({ command: "setPixelated", value: false });
+
+    // Next image (>64px) with unsafe javascript: anchor + data: src keeps pixelated=false and falls back to prUrl
     lbNext.emit("click", {});
     expect(lbCounter.textContent).toBe("2 / 2");
     expect(lbGithub.href).toBe("https://github.com/acme/repo/pull/42");
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
 
     // Plain click on empty backdrop outside image bounds closes lightbox
     lbStage.emit("pointerdown", { button: 0, clientX: 20, clientY: 20, pointerId: 2 });
     lbStage.emit("pointerup", {});
     lbStage.emit("click", { target: lbStage, clientX: 20, clientY: 20 });
     expect(lbEl.classList.contains("open")).toBe(false);
+
+    // Reopening another image still keeps pixelated=false
+    dataWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
   });
 });

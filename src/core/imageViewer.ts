@@ -133,13 +133,17 @@ export function renderBackdropSwatches(groupId: string, strings: IImageViewerStr
   </div>`;
 }
 
-export function renderZoomToolbarControls(prefix: string, strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS): string {
+export function renderZoomToolbarControls(
+  prefix: string,
+  strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS,
+  pixelated = true,
+): string {
   const id = escapeHtml(prefix);
   return `<button class="ghcc-btn" type="button" id="${id}-zoom-out" aria-label="${escapeHtml(strings.zoomOut)}" data-tooltip="${escapeHtml(strings.zoomOut)}">${IMAGE_VIEWER_ICONS.zoomOut}</button>
     <button class="ghcc-btn ghcc-zoom-val" type="button" id="${id}-zoom-val" aria-label="${escapeHtml(strings.zoomToggle)}" data-tooltip="${escapeHtml(strings.zoomToggle)}">100%</button>
     <button class="ghcc-btn" type="button" id="${id}-zoom-in" aria-label="${escapeHtml(strings.zoomIn)}" data-tooltip="${escapeHtml(strings.zoomIn)}">${IMAGE_VIEWER_ICONS.zoomIn}</button>
     <button class="ghcc-btn" type="button" id="${id}-fit" aria-label="${escapeHtml(strings.zoomFit)}" data-tooltip="${escapeHtml(strings.zoomFit)}">${IMAGE_VIEWER_ICONS.fit}</button>
-    <button class="ghcc-btn" type="button" id="${id}-pixel" aria-pressed="false" aria-label="${escapeHtml(strings.pixelCrisp)}" data-tooltip="${escapeHtml(strings.pixelCrisp)}">${IMAGE_VIEWER_ICONS.pixel}</button>`;
+    <button class="ghcc-btn" type="button" id="${id}-pixel" aria-pressed="${pixelated ? "true" : "false"}" aria-label="${escapeHtml(strings.pixelCrisp)}" data-tooltip="${escapeHtml(strings.pixelCrisp)}">${IMAGE_VIEWER_ICONS.pixel}</button>`;
 }
 
 export const IMAGE_VIEWER_SHARED_CSS = `

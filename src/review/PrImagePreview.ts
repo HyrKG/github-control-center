@@ -94,13 +94,22 @@ function cloneSnapshot(snapshot: IImagePreviewSnapshot): IImagePreviewSnapshot {
   };
 }
 
+export interface IImagePixelatedPreference {
+  get(): boolean;
+  set(value: boolean): void;
+}
+
 export class PrImagePreview implements vscode.Disposable {
   private readonly panels = new Map<string, IPanelEntry>();
+  private pixelated: boolean;
 
   constructor(
     private readonly readFile: (side: IImageSide) => Promise<IFileBytes>,
     private readonly strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS,
-  ) {}
+    private readonly preference?: IImagePixelatedPreference,
+  ) {
+    this.pixelated = preference ? preference.get() : true;
+  }
 
   async open({ key, title, changeType, left, right }: IImageChange): Promise<void> {
     const existing = this.panels.get(key);
@@ -147,12 +156,23 @@ export class PrImagePreview implements vscode.Disposable {
 
     if (!existing) {
       panel.webview.onDidReceiveMessage((message: unknown) => {
-        if ((message as { command?: string } | null)?.command !== "ready") {
+        const payload = message as { command?: string; value?: unknown } | null;
+        if (payload?.command === "ready") {
+          const current = this.panels.get(key);
+          if (current && current.panel === panel) {
+            void panel.webview.postMessage({ command: "state", snapshot: cloneSnapshot(current.snapshot) });
+            void panel.webview.postMessage({ command: "pixelated", value: this.pixelated });
+          }
           return;
         }
-        const current = this.panels.get(key);
-        if (current && current.panel === panel) {
-          void panel.webview.postMessage({ command: "state", snapshot: cloneSnapshot(current.snapshot) });
+        if (payload?.command === "setPixelated" && typeof payload.value === "boolean") {
+          this.pixelated = payload.value;
+          this.preference?.set(payload.value);
+          for (const entry of this.panels.values()) {
+            if (entry.panel !== panel) {
+              void entry.panel.webview.postMessage({ command: "pixelated", value: payload.value });
+            }
+          }
         }
       });
       panel.onDidDispose(() => {
@@ -162,7 +182,7 @@ export class PrImagePreview implements vscode.Disposable {
       });
     }
 
-    panel.webview.html = renderImagePreviewHtml(snapshot, randomUUID(), this.strings);
+    panel.webview.html = renderImagePreviewHtml(snapshot, randomUUID(), this.strings, this.pixelated);
 
     await Promise.all(
       activeSides.map(async ({ source }, index) => {
@@ -526,12 +546,13 @@ export function renderImagePreviewHtml(
   snapshot: IImagePreviewSnapshot,
   nonce: string,
   strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS,
+  pixelated = true,
 ): string {
   const pill = changeTypeStatus(snapshot.changeType, strings);
   const defaultUrl =
     snapshot.sides.find((side) => side.side === "head")?.url ?? snapshot.sides[0]?.url ?? "#";
 
-  const payload = safeJsonForScript({ snapshot, strings });
+  const payload = safeJsonForScript({ snapshot, strings, pixelated: Boolean(pixelated) });
   const iconsJson = safeJsonForScript({
     externalLink: IMAGE_VIEWER_ICONS.externalLink,
     swipe: IMAGE_VIEWER_ICONS.swipe,
@@ -570,7 +591,7 @@ export function renderImagePreviewHtml(
       <div class="pr-img-tools">
         ${renderBackdropSwatches("a-swatches", strings)}
         <span class="ghcc-sep"></span>
-        ${renderZoomToolbarControls("a", strings)}
+        ${renderZoomToolbarControls("a", strings, pixelated)}
         <span class="ghcc-sep"></span>
         <a class="ghcc-btn" id="a-github" href="${escapeHtml(defaultUrl)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(strings.openGitHub)}" data-tooltip="${escapeHtml(strings.openGitHub)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.externalLink}</a>
       </div>
@@ -627,8 +648,7 @@ export function renderImagePreviewHtml(
         mode: "split",
         activeSide: "head",
         bg: "checker",
-        pixelated: false,
-        userToggledPixel: false,
+        pixelated: Boolean(BOOT.pixelated),
         swipePct: 50,
         dims: Object.create(null),
         layoutKind: "",
@@ -756,28 +776,6 @@ export function renderImagePreviewHtml(
         onUpdate: applyTransform,
       });
 
-      function maybeAutoPixelate() {
-        if (state.userToggledPixel) {
-          return;
-        }
-        let maxSide = 0;
-        readySides().forEach((side) => {
-          const d = state.dims[side.side];
-          if (d) {
-            maxSide = Math.max(maxSide, d.w, d.h);
-          }
-        });
-        if (maxSide === 0) {
-          return;
-        }
-        const autoPixel = maxSide <= 64;
-        if (state.pixelated !== autoPixel) {
-          state.pixelated = autoPixel;
-          pixelBtn.setAttribute("aria-pressed", String(autoPixel));
-          state.viewports.forEach((vp) => vp.classList.toggle("pixelated", autoPixel));
-        }
-      }
-
       function updateMetaDisplays() {
         const snap = state.snapshot;
         const statusInfo = STATUS_MAP[snap.changeType] || STATUS_MAP.MODIFIED;
@@ -891,15 +889,7 @@ export function renderImagePreviewHtml(
         return img;
       }
 
-      function onImageReady(preserveTransform) {
-        maybeAutoPixelate();
-        updateMetaDisplays();
-        if (!ctrl.state.hasFitted || (!preserveTransform && ctrl.state.isFitted)) {
-          requestAnimationFrame(() => ctrl.fit());
-        } else {
-          applyTransform(ctrl.state);
-        }
-      }
+      function updateMetaDisplays() {
 
       function createPaneHeader(side) {
         const head = document.createElement("div");
@@ -1303,16 +1293,23 @@ export function renderImagePreviewHtml(
         });
       });
 
+      function setPixelated(next, notifyHost) {
+        state.pixelated = Boolean(next);
+        pixelBtn.setAttribute("aria-pressed", String(state.pixelated));
+        state.viewports.forEach((vp) => vp.classList.toggle("pixelated", state.pixelated));
+        if (isActiveCanvasReady()) {
+          applyTransform(ctrl.state);
+        }
+        if (notifyHost) {
+          vscodeApi.postMessage({ command: "setPixelated", value: state.pixelated });
+        }
+      }
+
       zoomInBtn.addEventListener("click", () => ctrl.stepZoom(1));
       zoomOutBtn.addEventListener("click", () => ctrl.stepZoom(-1));
       fitBtn.addEventListener("click", () => ctrl.fit());
       zoomValBtn.addEventListener("click", () => ctrl.toggleFitOneToOne());
-      pixelBtn.addEventListener("click", () => {
-        state.userToggledPixel = true;
-        state.pixelated = !state.pixelated;
-        pixelBtn.setAttribute("aria-pressed", String(state.pixelated));
-        state.viewports.forEach((vp) => vp.classList.toggle("pixelated", state.pixelated));
-      });
+      pixelBtn.addEventListener("click", () => setPixelated(!state.pixelated, true));
 
       document.addEventListener("keydown", (e) => {
         if (e.metaKey || e.ctrlKey || e.altKey) {
@@ -1351,6 +1348,10 @@ export function renderImagePreviewHtml(
       });
 
       window.addEventListener("message", (event) => {
+        if (event.data?.command === "pixelated" && typeof event.data.value === "boolean") {
+          setPixelated(event.data.value, false);
+          return;
+        }
         if (event.data?.command !== "state" || !event.data.snapshot) {
           return;
         }

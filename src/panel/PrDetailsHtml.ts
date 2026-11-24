@@ -1080,6 +1080,7 @@ export function renderPrDetailsHtml(
   mermaidScriptUri?: string,
   defaultUpdateMethod: UpdateBranchMethod = "REBASE",
   brief?: IBriefState,
+  pixelated = true,
 ): string {
   const fileRoot = gitHubFileRoot(details.headRepo, details.headRefOid, "raw");
   const processBody = (html: string) => normalizeBodyImages(replaceMermaidSections(html), fileRoot);
@@ -1118,13 +1119,13 @@ export function renderPrDetailsHtml(
       <div class="lb-tools">
         ${renderBackdropSwatches("lb-swatches", strings)}
         <span class="ghcc-sep"></span>
-        ${renderZoomToolbarControls("lb", strings)}
+        ${renderZoomToolbarControls("lb", strings, pixelated)}
         <span class="ghcc-sep"></span>
         <a class="ghcc-btn" id="lb-github" href="${escapeHtml(processedDetails.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(strings.openGitHub)}" data-tooltip="${escapeHtml(strings.openGitHub)}">${IMAGE_VIEWER_ICONS.externalLink}</a>
         <button class="ghcc-btn" type="button" id="lb-close" aria-label="${escapeHtml(strings.close)}" data-tooltip="${escapeHtml(strings.close)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.close}</button>
       </div>
     </div>
-    <div class="lb-stage ghcc-surface" id="lb-stage" data-bg="checker">
+    <div class="lb-stage ghcc-surface${pixelated ? " pixelated" : ""}" id="lb-stage" data-bg="checker">
       <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(strings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
       <img class="canvas-img" id="lb-img" alt="">
       <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(strings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
@@ -1205,7 +1206,7 @@ export function renderPrDetailsHtml(
     const lbFitBtn = document.getElementById("lb-fit");
     const lbSwatches = Array.from(document.querySelectorAll("#lb-swatches .ghcc-swatch"));
 
-    const lbState = { items: [], index: 0, bg: "checker", pixelated: false };
+    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)} };
     let lbCtrl = null;
 
     function collectLightboxImages() {
@@ -1243,6 +1244,8 @@ export function renderPrDetailsHtml(
       if (lbGithub) {
         lbGithub.href = item.href;
       }
+      lbStage.classList.toggle("pixelated", lbState.pixelated);
+      lbPixelBtn?.setAttribute("aria-pressed", String(lbState.pixelated));
 
       const onReady = () => {
         const nw = lbImg.naturalWidth || item.w || 0;
@@ -1253,10 +1256,6 @@ export function renderPrDetailsHtml(
           if (lbDim) {
             lbDim.textContent = nw + "×" + nh;
           }
-          const tiny = Math.max(nw, nh) <= 64;
-          lbState.pixelated = tiny;
-          lbStage.classList.toggle("pixelated", tiny);
-          lbPixelBtn?.setAttribute("aria-pressed", String(tiny));
         } else if (lbDim) {
           lbDim.textContent = "";
         }
@@ -1324,6 +1323,10 @@ export function renderPrDetailsHtml(
         lbState.pixelated = !lbState.pixelated;
         lbPixelBtn.setAttribute("aria-pressed", String(lbState.pixelated));
         lbStage.classList.toggle("pixelated", lbState.pixelated);
+        if (lbEl.classList.contains("open")) {
+          lbCtrl.refitIfFitted();
+        }
+        vscodeApi.postMessage({ command: "setPixelated", value: lbState.pixelated });
       });
       lbCloseBtn?.addEventListener("click", closeLightbox);
       lbPrev?.addEventListener("click", () => showLightboxIndex(lbState.index - 1));
