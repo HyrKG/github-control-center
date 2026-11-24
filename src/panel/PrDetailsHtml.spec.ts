@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
+import { describe, expect, it, vi } from "vitest";
 import { renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails } from "../core/types";
 
@@ -20,6 +21,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
     baseRefName: "main",
     headRefName: "feature/thing",
     headRepo: "acme/repo",
+    headRefOid: "head-oid",
     isBehindBase: false,
     commitsCount: 3,
     changedFiles: 1,
@@ -803,4 +805,112 @@ describe("renderPrDetailsHtml", () => {
       expect(html).toContain("Claude CLI failed: run /login");
     });
   });
+});
+
+describe("conversation images", () => {
+  it("normalizes relative and root paths in PR descriptions, comments, and review summaries", () => {
+    const details = buildDetails({ headRepo: "contributor/fork" });
+    details.bodyHtml = '<img src="./assets/画 %231.png"><img src="/user-attachments/assets/123">';
+    details.timeline[0].bodyHtml = "<IMG SRC='docs/picture.png'>";
+    details.timeline[1].bodyHtml = '<img src="/acme/repo/raw/main/images/screenshot.jpg">';
+    const html = renderPrDetailsHtml(details, NONCE, NOW);
+
+    expect(html).toContain('src="https://github.com/contributor/fork/raw/head-oid/assets/%E7%94%BB%20%231.png"');
+    expect(html).toContain('src="https://github.com/user-attachments/assets/123"');
+    expect(html).toContain('SRC="https://github.com/contributor/fork/raw/head-oid/docs/picture.png"');
+    expect(html).toContain('src="https://github.com/acme/repo/raw/main/images/screenshot.jpg"');
+  });
+
+  it("preserves HTTPS and data URLs, signed query strings, and unrelated attributes", () => {
+    const html = render({
+      bodyHtml: '<!-- <img src="ignored.png"> --><img src="https://host/image?sig=a%2F%2Bb&amp;x=1" alt=\'it says src="ignore.png"\'><img src=data:image/png;base64,AA==>',
+    });
+
+    expect(html).toContain('<!-- <img src="ignored.png"> -->');
+    expect(html).toContain('src="https://host/image?sig=a%2F%2Bb&amp;x=1"');
+    expect(html).toContain('alt=\'it says src="ignore.png"\'');
+    expect(html).toContain('src="data:image/png;base64,AA=="');
+    expect(html).toContain("img-src https: data:");
+  });
+
+  it("normalizes srcset candidates for picture sources and images, keeping data URL commas and descriptors", () => {
+    const html = render({
+      bodyHtml: '<picture><source srcset="a.png 1x, /user-attachments/assets/b 2x, https://cdn/c.png 3x"><img src="a.png" srcset="data:image/png;base64,AA== 1x, //cdn/d.png 2x"></picture>',
+    });
+
+    expect(html).toContain('srcset="https://github.com/acme/repo/raw/head-oid/a.png 1x, https://github.com/user-attachments/assets/b 2x, https://cdn/c.png 3x"');
+    expect(html).toContain('srcset="data:image/png;base64,AA== 1x, https://cdn/d.png 2x"');
+  });
+
+  it("strips oversized inline images before sending HTML to the webview", () => {
+    const oversized = 'A'.repeat(Math.ceil((10 * 1024 * 1024 + 1) * 4 / 3));
+    const html = render({ bodyHtml: `<img src="data:image/png;base64,${oversized}">` });
+
+    expect(html).toContain('<img src="data:,">');
+    expect(html).not.toContain("data:image/png;base64,AAAA");
+  });
+});
+
+it("requests only failed images once and replaces them with the resolved data or a GitHub link", () => {
+  class Image {
+    readonly isConnected = true;
+    src: string;
+    removeAttribute = vi.fn();
+    replaceWith = vi.fn();
+    addEventListener = vi.fn();
+
+    constructor(readonly currentSrc: string) {
+      this.src = currentSrc;
+    }
+
+    closest(selector: string) {
+      return selector === ".timeline .box-body" ? {} : null;
+    }
+  }
+  const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
+  const error = vi.fn();
+  const message = vi.fn();
+  const postMessage = vi.fn();
+  const link = { href: "", textContent: "" };
+  const placeholder = { append: vi.fn() };
+  const composer = { value: "", addEventListener: vi.fn() };
+  let sequence = 0;
+  runInNewContext(script, {
+    acquireVsCodeApi: () => ({ getState: () => undefined, postMessage }),
+    crypto: { randomUUID: () => `image-${++sequence}` },
+    HTMLImageElement: Image,
+    document: {
+      getElementById: (id: string) => ["composer-text", "comment"].includes(id) ? composer : null,
+      querySelectorAll: () => [],
+      querySelector: () => null,
+      addEventListener: error,
+      createElement: (name: string) => name === "a" ? link : placeholder,
+    },
+    window: { addEventListener: message },
+  });
+
+  const captureError = error.mock.calls[0][1];
+  const receive = message.mock.calls.find(([event]) => event === "message")?.[1];
+  const privateImage = new Image("https://github.com/acme/repo/raw/main/image.png");
+  const attachment = new Image("https://github.com/user-attachments/assets/123");
+  expect(error).toHaveBeenCalledWith("error", expect.any(Function), true);
+  expect(postMessage).not.toHaveBeenCalled();
+
+  captureError({ target: privateImage });
+  captureError({ target: privateImage });
+  captureError({ target: attachment });
+  expect(postMessage.mock.calls.map(([payload]) => payload)).toEqual([
+    { command: "resolveImage", src: privateImage.currentSrc, requestId: "image-1" },
+    { command: "resolveImage", src: attachment.currentSrc, requestId: "image-2" },
+  ]);
+
+  receive({ data: { command: "imageResolved", requestId: "image-1", dataUri: "data:image/png;base64,AA==" } });
+  expect(privateImage.src).toBe("data:image/png;base64,AA==");
+  expect(privateImage.removeAttribute).toHaveBeenCalledWith("srcset");
+  expect(privateImage.addEventListener).toHaveBeenCalledWith("error", expect.any(Function), { once: true });
+
+  receive({ data: { command: "imageResolved", requestId: "image-2", url: attachment.currentSrc } });
+  expect(attachment.replaceWith).toHaveBeenCalledExactlyOnceWith(placeholder);
+  expect(link).toEqual({ href: attachment.currentSrc, textContent: "Open on GitHub" });
+  expect(placeholder.append).toHaveBeenCalledWith("Could not load this image. ", link);
 });

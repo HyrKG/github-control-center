@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { MAX_IMAGE_BYTES } from "../core/types";
 import type {
   CiState,
   DiffSide,
@@ -39,6 +40,7 @@ const PR_FIELDS = `
     headRefName
     baseRefOid
     headRefOid
+    headRepository { nameWithOwner }
     author { login }
     repository { nameWithOwner }
     viewerLatestReview { state commit { oid } submittedAt }
@@ -71,6 +73,7 @@ interface IGraphQlPrNode {
   headRefName: string;
   baseRefOid: string;
   headRefOid: string;
+  headRepository?: { nameWithOwner: string } | null;
   author: { login: string } | null;
   repository: { nameWithOwner: string };
   viewerLatestReview: { state: string; commit: { oid: string } | null; submittedAt: string } | null;
@@ -300,8 +303,9 @@ const REST_ENDPOINT = "https://api.github.com";
 // GitHub lists at most 3000 files per PR: 30 pages of 100
 const MAX_FILE_PAGES = 30;
 
-async function getRest(token: string, path: string, accept: string): Promise<Response> {
+async function getRest(token: string, path: string, accept: string, redirect?: RequestRedirect): Promise<Response> {
   const response = await fetch(`${REST_ENDPOINT}${path}`, {
+    ...(redirect && { redirect }),
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: accept,
@@ -333,10 +337,56 @@ export async function fetchPrFilePatches(token: string, repo: string, prNumber: 
 }
 
 export async function fetchFileContent(token: string, repo: string, path: string, sha: string): Promise<string> {
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   // the raw media type streams the blob directly, avoiding the 1MB base64 JSON cap
-  const response = await getRest(token, `/repos/${repo}/contents/${encodedPath}?ref=${sha}`, "application/vnd.github.raw+json");
+  const response = await getRest(token, fileContentsPath(repo, path, sha), "application/vnd.github.raw+json");
   return response.text();
+}
+
+function fileContentsPath(repo: string, path: string, ref: string): string {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return `/repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`;
+}
+
+export class FileTooLargeError extends Error {
+  constructor() {
+    super("The image exceeds the 10 MB preview limit.");
+  }
+}
+
+export interface IFileBytes {
+  bytes: Uint8Array;
+  contentType: string | null;
+}
+
+export async function fetchFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes> {
+  const response = await getRest(token, fileContentsPath(repo, path, ref), "application/vnd.github.raw+json", "error");
+  if (Number(response.headers.get("content-length")) > MAX_IMAGE_BYTES) {
+    await response.body?.cancel();
+    throw new FileTooLargeError();
+  }
+  // Bound the actual stream too: the length header can be absent or describe compressed bytes.
+  const reader = response.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (reader) {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        size += value.byteLength;
+        if (size > MAX_IMAGE_BYTES) {
+          await reader.cancel();
+          throw new FileTooLargeError();
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  return { bytes: Buffer.concat(chunks, size), contentType: response.headers.get("content-type") };
 }
 
 export async function fetchPullRequests(token: string): Promise<IPrSnapshot> {
@@ -677,6 +727,7 @@ function toPullRequest(node: IGraphQlPrNode & { id: string }): IPullRequest {
     title: node.title,
     url: node.url,
     repo: node.repository.nameWithOwner,
+    headRepo: node.headRepository?.nameWithOwner,
     author: node.author?.login ?? "unknown",
     isDraft: node.isDraft,
     createdAt: node.createdAt,
@@ -736,6 +787,7 @@ function toPrDetails(node: IGraphQlDetailsNode, viewerLogin: string): IPrDetails
     baseRefName: node.baseRefName,
     headRefName: node.headRefName,
     headRepo: node.headRepository?.nameWithOwner ?? node.repository.nameWithOwner,
+    headRefOid: node.headRefOid,
     // Ref.compare works without branch protection; mergeStateStatus only reports BEHIND with strict protection.
     // compare(headRef:) resolves the name inside the BASE repo, so on a cross-fork PR a same-named
     // base-repo branch would be compared instead — skip the check entirely for forks.

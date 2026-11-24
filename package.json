@@ -129,6 +129,11 @@
         "category": "GitHub Control Center"
       },
       {
+        "command": "githubControlCenter.openTextDiff",
+        "title": "Open Text Diff",
+        "category": "GitHub Control Center"
+      },
+      {
         "command": "githubControlCenter.viewFilesAsList",
         "title": "View Files as List",
         "category": "GitHub Control Center",
@@ -415,6 +420,10 @@
           "when": "false"
         },
         {
+          "command": "githubControlCenter.openTextDiff",
+          "when": "false"
+        },
+        {
           "command": "githubControlCenter.review.addComment",
           "when": "false"
         },
@@ -460,6 +469,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "githubControlCenter.openTextDiff",
+          "when": "(view == githubControlCenter.toReview || view == githubControlCenter.reviewed || view == githubControlCenter.mine) && viewItem == prFile",
+          "group": "1_open"
+        },
         {
           "command": "githubControlCenter.checkoutPr",
           "when": "(view == githubControlCenter.toReview || view == githubControlCenter.reviewed || view == githubControlCenter.mine) && viewItem == pr",

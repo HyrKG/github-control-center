@@ -1,8 +1,11 @@
 import { buildBriefPrompt, buildBriefSystemPrompt } from "../brief/briefPrompt";
 import type { BriefStore } from "../brief/briefState";
 import { toErrorMessage } from "../core/errors";
+import { gitHubFileUrl, isGitHubImageLink, parseGitHubFileUrl } from "../github/fileUrls";
+import { FileTooLargeError, type IFileBytes } from "../github/github";
+import { imageDataUri } from "../review/PrImagePreview";
 import { MERGE_METHOD_LABELS, UPDATE_METHOD_LABELS } from "./PrDetailsHtml";
-import { formatPrTabTitle, type IPanelMessage } from "./PrDetailsPanel";
+import { formatPrTabTitle, type IImageResolution, type IPanelMessage } from "./PrDetailsPanel";
 import type { IBriefState, IPrDetails, IPrFile, IPrFilePatch, IPullRequest, MergeMethod, UpdateBranchMethod } from "../core/types";
 
 // GitHub reads lag behind writes: one delayed catch-up refresh after each successful mutation
@@ -16,12 +19,14 @@ export interface IDetailsSessionPanel {
   updateDetails(details: IPrDetails, brief?: IBriefState): void;
   readonly isVisible: boolean;
   reenableActions(): void;
+  postImageResolution(result: IImageResolution): void;
 }
 
 export interface IDetailsSessionDeps {
   panel: IDetailsSessionPanel;
   getSession(createIfNone: boolean): PromiseLike<{ accessToken: string } | undefined>;
   fetchPrDetails(token: string, prId: string, headRefName: string): Promise<IPrDetails>;
+  fetchFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes>;
   loadPrFiles(pr: IPullRequest): Promise<IPrFile[]>;
   ensurePatches(pr: IPullRequest): Promise<Map<string, IPrFilePatch>>;
   /** the single BriefStore instance owned by extension.ts (hydrated from context.globalState) — never construct a second one */
@@ -53,7 +58,7 @@ export interface IDetailsSessionDeps {
   log(message: string): void;
 }
 
-type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" }>;
+type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | "resolveImage" }>;
 
 /**
  * Owns the open PR-details-panel state: which PR is showing, its details/brief pairing, the
@@ -144,6 +149,31 @@ export class DetailsSession {
     }
   }
 
+  private async resolveImage(pr: IPullRequest, details: IPrDetails, { src, requestId }: Extract<IPanelMessage, { command: "resolveImage" }>): Promise<void> {
+    const sequence = this.detailsRequestSequence;
+    const file = parseGitHubFileUrl(src, [details.headRefName, details.baseRefName]);
+    const url = file ? gitHubFileUrl(file) : isGitHubImageLink(src) ? src : pr.url;
+    const result: IImageResolution = { requestId, url };
+    if (file) {
+      try {
+        const session = await this.deps.getSession(false);
+        if (session) {
+          const dataUri = imageDataUri(file.path, await this.deps.fetchFileBytes(session.accessToken, file.repo, file.path, file.ref));
+          if (dataUri) {
+            result.dataUri = dataUri;
+          }
+        }
+      } catch (error) {
+        if (error instanceof FileTooLargeError) {
+          result.message = error.message;
+        }
+      }
+    }
+    if (sequence === this.detailsRequestSequence) {
+      this.deps.panel.postImageResolution(result);
+    }
+  }
+
   // called every poll cycle with the fresh raw (pre-filter) snapshot: re-points the open-panel PR
   // at its fresh entry — without this, headRefOid would freeze at click time and a push would keep
   // serving the stale brief cache key. Only re-points; the caller still calls refreshOpenDetails()
@@ -165,6 +195,12 @@ export class DetailsSession {
       return;
     }
     const pr = this.currentDetailsPr;
+    if (message.command === "resolveImage") {
+      if (pr && this.currentDetails?.prId === pr.id && typeof message.src === "string" && typeof message.requestId === "string") {
+        void this.resolveImage(pr, this.currentDetails.details, message);
+      }
+      return;
+    }
     if (!pr || this.mutationInFlight) {
       return;
     }

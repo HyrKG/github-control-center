@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import {
   addPrComment,
+  fetchFileBytes,
   fetchFileContent,
   fetchPrDetails,
   fetchPrFilePatches,
@@ -31,6 +32,7 @@ import { applyFilters, partitionReviewed } from "./poll/filters";
 import { NewPrTracker } from "./poll/NewPrTracker";
 import { AsyncOidCache } from "./core/OidCache";
 import { PrContentProvider, fromPrUri, toPrUri } from "./review/PrContentProvider";
+import { imageMimeType, PrImagePreview } from "./review/PrImagePreview";
 import { PrDetailsPanel } from "./panel/PrDetailsPanel";
 import { PollScheduler } from "./poll/PollScheduler";
 import { PrTreeProvider, type FilesLayout, type IFileNode, type TreeNode } from "./tree/PrTreeProvider";
@@ -250,7 +252,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  async function openFileDiff(node: IFileNode): Promise<void> {
+  const imagePreview = new PrImagePreview(async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha));
+
+  async function openFileDiff(node: IFileNode, forceText = false): Promise<void> {
     const { pr, file } = node;
     try {
       reviewController.registerPr(pr);
@@ -262,22 +266,28 @@ export function activate(context: vscode.ExtensionContext): void {
       const patches = await ensurePatches(pr);
       const previousPath = patches.get(file.path)?.previousPath;
       const shared = { prId: pr.id, repo: pr.repo, prNumber: pr.number, headOid: pr.headRefOid };
-      const leftUri = toPrUri({
+      const left = {
         ...shared,
         path: previousPath ?? file.path,
         sha: pr.baseRefOid,
-        side: "LEFT",
+        side: "LEFT" as const,
         isEmpty: file.changeType === "ADDED",
-      });
-      const rightUri = toPrUri({
+      };
+      const right = {
         ...shared,
         path: file.path,
         sha: pr.headRefOid,
-        side: "RIGHT",
+        side: "RIGHT" as const,
         isEmpty: file.changeType === "DELETED",
-      });
+      };
       const basename = file.path.slice(file.path.lastIndexOf("/") + 1);
-      await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, `${basename} (PR #${pr.number})`, { preview: true });
+      const title = `${basename} (PR #${pr.number})`;
+      if (!forceText && [left, right].some((side) => !side.isEmpty && imageMimeType(side.path))) {
+        const head = { ...right, repo: pr.headRepo ?? pr.repo };
+        await imagePreview.open({ key: JSON.stringify([pr.id, file.path]), title, changeType: file.changeType, left, right: head });
+        return;
+      }
+      await vscode.commands.executeCommand("vscode.diff", toPrUri(left), toPrUri(right), title, { preview: true });
     } catch (error) {
       void vscode.window.showErrorMessage(`Failed to open the diff: ${toErrorMessage(error)}`);
     }
@@ -473,6 +483,7 @@ export function activate(context: vscode.ExtensionContext): void {
     panel: detailsPanel,
     getSession,
     fetchPrDetails,
+    fetchFileBytes,
     loadPrFiles,
     ensurePatches,
     briefStore,
@@ -684,6 +695,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("githubControlCenter.openPrDetails", (pr: IPullRequest) => void detailsSession.openPrDetails(pr)),
     vscode.workspace.registerTextDocumentContentProvider(PR_URI_SCHEME, contentProvider),
     vscode.commands.registerCommand("githubControlCenter.openFileDiff", (node: IFileNode) => void openFileDiff(node)),
+    vscode.commands.registerCommand("githubControlCenter.openTextDiff", (node: IFileNode) => void openFileDiff(node, true)),
     vscode.commands.registerCommand("githubControlCenter.review.resolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, "Resolve conversation", resolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.unresolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, "Unresolve conversation", unresolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.addComment", (reply: vscode.CommentReply) => void handleAddComment(reply, false)),
@@ -701,6 +713,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void ghccConfig().update("files.layout", "tree", vscode.ConfigurationTarget.Global);
     }),
     reviewController,
+    imagePreview,
     pendingStatusBar,
     toReviewView.onDidChangeCheckboxState(handleCheckboxChange),
     reviewedView.onDidChangeCheckboxState(handleCheckboxChange),

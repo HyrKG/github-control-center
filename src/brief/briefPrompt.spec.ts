@@ -17,6 +17,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
     baseRefName: "main",
     headRefName: "feature/thing",
     headRepo: "acme/repo",
+    headRefOid: "head-oid",
     isBehindBase: false,
     commitsCount: 3,
     changedFiles: 2,

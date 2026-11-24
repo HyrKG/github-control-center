@@ -10,7 +10,15 @@ export type IPanelMessage =
   | { command: "updateBranch"; method: UpdateBranchMethod }
   | { command: "checkout" }
   | { command: "brief" }
+  | { command: "resolveImage"; src: string; requestId: string }
   | { command: "composerState"; hasText: boolean };
+
+export interface IImageResolution {
+  requestId: string;
+  url: string;
+  dataUri?: string;
+  message?: string;
+}
 
 export function formatPrTabTitle(pr: { repo: string; title: string; number: number }): string {
   return `${pr.repo} · ${pr.title} #${pr.number}`;
@@ -52,6 +60,10 @@ export class PrDetailsPanel {
 
   reenableActions(): void {
     void this.panel?.webview.postMessage({ command: "reenable" });
+  }
+
+  postImageResolution(result: IImageResolution): void {
+    void this.panel?.webview.postMessage({ command: "imageResolved", ...result });
   }
 
   dispose(): void {

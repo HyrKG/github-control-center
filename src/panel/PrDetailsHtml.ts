@@ -1,3 +1,6 @@
+import { escapeHtml } from "../core/html";
+import { gitHubFileRoot } from "../github/fileUrls";
+import { MAX_IMAGE_BYTES } from "../core/types";
 import type { IBriefState, IPrDetails, IPrTimelineItem, MergeMethod, UpdateBranchMethod } from "../core/types";
 
 export const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
@@ -287,18 +290,11 @@ const BASE_STYLE = `
     color: var(--gr-yellow);
   }
   .header-actions { margin-top: 10px; display: flex; gap: 8px; }
+  .image-fallback { color: var(--gr-muted); }
   .brief-section summary { cursor: pointer; font-weight: 600; color: var(--gr-muted); padding: 8px 12px; }
   .brief-section[open] summary { border-bottom: 1px solid var(--gr-border); }
   .brief-avatar { display: flex; align-items: center; justify-content: center; }
 `;
-
-export function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
 
 function htmlDocument(nonce: string, body: string, script = ""): string {
   return `<!DOCTYPE html>
@@ -726,6 +722,73 @@ export function decodeHtmlEntities(value: string): string {
     .replaceAll("&amp;", "&");
 }
 
+// bodyHTML is already sanitized by GitHub. Match complete tags so quoted attributes and
+// code samples cannot be mistaken for an image tag or a src attribute.
+export function normalizeBodyImages(html: string, fileRoot: string): string {
+  return html.replace(/<!--[\s\S]*?-->|<[a-z][\w:-]*(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, (tag) => {
+    if (!/^<(?:img|source)(?=[\s/>])/i.test(tag)) {
+      return tag;
+    }
+    return tag.replace(/(\s+)([^\s=/>]+)(\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))/g,
+      (attr, space: string, name: string, equals: string, _quoted, double: string | undefined, single: string | undefined, bare: string) => {
+        const attribute = name.toLowerCase();
+        if (attribute !== "src" && attribute !== "srcset") {
+          return attr;
+        }
+        const value = decodeHtmlEntities(double ?? single ?? bare);
+        const normalized = attribute === "src" ? normalizeImageUrl(value, fileRoot) : normalizeSrcset(value, fileRoot);
+        return `${space}${name}${equals}"${escapeHtml(normalized)}"`;
+      });
+  });
+}
+
+function normalizeImageUrl(src: string, fileRoot: string): string {
+  const value = src.trim();
+  if (!value) {
+    return value;
+  }
+  if (/^data:/i.test(value)) {
+    const comma = value.indexOf(",");
+    const payload = value.slice(comma + 1);
+    const size = /;base64$/i.test(value.slice(0, comma))
+      ? Math.floor((payload.length - (payload.match(/={1,2}$/)?.[0].length ?? 0)) * 3 / 4)
+      : Buffer.byteLength(payload.replace(/%[\da-f]{2}/gi, "_"));
+    return size > MAX_IMAGE_BYTES ? "data:," : value;
+  }
+  if (/^[a-z][a-z\d+.-]*:/i.test(value)) {
+    return value;
+  }
+  try {
+    const url = new URL(value, "https://github.com/");
+    return value.startsWith("/") ? url.href : fileRoot + url.pathname.slice(1) + url.search + url.hash;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeSrcset(value: string, fileRoot: string): string {
+  const candidates: string[] = [];
+  let rest = value;
+  for (;;) {
+    // As in HTML's srcset parser, commas inside URL tokens (including data URLs) belong
+    // to the URL. Trailing commas or commas following a descriptor end a candidate.
+    rest = rest.replace(/^[\s,]+/, "");
+    const token = /^\S+/.exec(rest)?.[0];
+    if (!token) {
+      return candidates.join(", ");
+    }
+    rest = rest.slice(token.length);
+    const url = token.replace(/,+$/, "");
+    const end = rest.indexOf(",");
+    const descriptor = token === url ? (end < 0 ? rest : rest.slice(0, end)).trim() : "";
+    if (token === url) {
+      rest = end < 0 ? "" : rest.slice(end + 1);
+    }
+    const normalized = normalizeImageUrl(url, fileRoot);
+    candidates.push(descriptor ? `${normalized} ${descriptor}` : normalized);
+  }
+}
+
 // GitHub ships each ```mermaid fence as a <section> rendered by its own site JS (dead in a webview).
 // The diagram source in data-json is HTML-encoded TWICE: once for the attribute, once inside the payload.
 // We swap the section for a plain <pre> with the fully decoded source — always readable, even unrendered —
@@ -790,10 +853,12 @@ export function renderPrDetailsHtml(
   defaultUpdateMethod: UpdateBranchMethod = "REBASE",
   brief?: IBriefState,
 ): string {
+  const fileRoot = gitHubFileRoot(details.headRepo, details.headRefOid, "raw");
+  const processBody = (html: string) => normalizeBodyImages(replaceMermaidSections(html), fileRoot);
   const processedDetails: IPrDetails = {
     ...details,
-    bodyHtml: replaceMermaidSections(details.bodyHtml),
-    timeline: details.timeline.map((item) => ({ ...item, bodyHtml: replaceMermaidSections(item.bodyHtml) })),
+    bodyHtml: processBody(details.bodyHtml),
+    timeline: details.timeline.map((item) => ({ ...item, bodyHtml: processBody(item.bodyHtml) })),
   };
   const timelineItems = renderTimeline(processedDetails.timeline, processedDetails.url, now);
   const olderLink = processedDetails.timelineTruncated ? `<a class="older-link" href="${escapeHtml(processedDetails.url)}">View older conversation on GitHub</a>` : "";
@@ -815,14 +880,53 @@ export function renderPrDetailsHtml(
     ${renderSidebar(processedDetails)}
   </div>`;
 
-  // the script only forwards user-typed text, the chosen merge method and a composer-has-text
-  // boolean — never ids or urls; the prKey below stays inside the webview (setState only)
   const script = `
   <script nonce="${nonce}">
     const vscodeApi = acquireVsCodeApi();
     const prKey = ${JSON.stringify(`${processedDetails.repo}#${processedDetails.number}`)};
+    const prUrl = ${JSON.stringify(processedDetails.url)};
     const composerText = document.getElementById("composer-text");
     const allButtons = Array.from(document.querySelectorAll("button"));
+    const requestedImages = new WeakSet();
+    const failingImages = new Map();
+
+    function showImageFallback(image, url, message) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "image-fallback";
+      const link = document.createElement("a");
+      link.href = url || prUrl;
+      link.textContent = "Open on GitHub";
+      placeholder.append((message || "Could not load this image.") + " ", link);
+      const target = image.closest("picture") || image;
+      const parent = target.parentElement;
+      if (parent?.matches("a") && parent.children.length === 1 && !parent.textContent.trim()) {
+        parent.replaceWith(placeholder);
+      } else {
+        target.replaceWith(placeholder);
+      }
+    }
+
+    function resolveFailedImage(image) {
+      if (!(image instanceof HTMLImageElement) || !image.closest(".timeline .box-body") || requestedImages.has(image)) {
+        return;
+      }
+      requestedImages.add(image);
+      const src = image.currentSrc || image.getAttribute("src") || "";
+      if (/^data:/i.test(src)) {
+        showImageFallback(image, prUrl, src === "data:," ? "The image exceeds the 10 MB preview limit." : undefined);
+        return;
+      }
+      const requestId = crypto.randomUUID();
+      failingImages.set(requestId, image);
+      vscodeApi.postMessage({ command: "resolveImage", src, requestId });
+    }
+
+    document.addEventListener("error", (event) => resolveFailedImage(event.target), true);
+    document.querySelectorAll(".timeline .box-body img").forEach((image) => {
+      if (image.complete && image.naturalWidth === 0 && (image.currentSrc || image.getAttribute("src"))) {
+        resolveFailedImage(image);
+      }
+    });
 
     // reenable must restore exactly what send froze: buttons rendered disabled by design
     // (brief pending/done) stay disabled when a confirmation is cancelled or a mutation fails
@@ -928,6 +1032,23 @@ export function renderPrDetailsHtml(
     // the extension re-enables the buttons when a confirmation is cancelled or a mutation fails,
     // so the typed comment survives instead of being wiped by a full re-render
     window.addEventListener("message", (event) => {
+      if (event.data?.command === "imageResolved") {
+        const { requestId, dataUri, url, message } = event.data;
+        const image = failingImages.get(requestId);
+        failingImages.delete(requestId);
+        if (!image?.isConnected) {
+          return;
+        }
+        if (!dataUri) {
+          showImageFallback(image, url, message);
+          return;
+        }
+        image.addEventListener("error", () => showImageFallback(image, url), { once: true });
+        image.closest("picture")?.querySelectorAll("source").forEach((source) => source.remove());
+        image.removeAttribute("srcset");
+        image.src = dataUri;
+        return;
+      }
       if (event.data && event.data.command === "reenable") {
         frozenButtons.forEach((button) => { button.disabled = false; });
         frozenButtons = [];
