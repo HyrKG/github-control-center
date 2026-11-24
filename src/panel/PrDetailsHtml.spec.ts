@@ -1,7 +1,8 @@
+import { runInNewContext, Script } from "node:vm";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
-import { afterEach, describe, expect, it } from "vitest";
 import { createPrDetailsStrings } from "./PrDetailsStrings";
-import { renderPrDetailsHtml } from "./PrDetailsHtml";
+import { decodeHtmlEntities, renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails } from "../core/types";
 
 const NONCE = "test-nonce-123";
@@ -22,6 +23,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
     baseRefName: "main",
     headRefName: "feature/thing",
     headRepo: "acme/repo",
+    headRefOid: "head-oid",
     isBehindBase: false,
     commitsCount: 3,
     changedFiles: 1,
@@ -837,5 +839,643 @@ describe("renderPrDetailsHtml", () => {
       expect(html).toContain("brief-error");
       expect(html).toContain("Claude CLI failed: run /login");
     });
+  });
+});
+
+describe("conversation images", () => {
+  it("normalizes relative and root paths in PR descriptions, comments, and review summaries", () => {
+    const details = buildDetails({ headRepo: "contributor/fork" });
+    details.bodyHtml = '<img src="./assets/画 %231.png"><img src="/user-attachments/assets/123">';
+    details.timeline[0].bodyHtml = "<IMG SRC='docs/picture.png'>";
+    details.timeline[1].bodyHtml = '<img src="/acme/repo/raw/main/images/screenshot.jpg">';
+    const html = renderPrDetailsHtml(details, NONCE, NOW, createPrDetailsStrings());
+
+    expect(html).toContain('src="https://github.com/contributor/fork/raw/head-oid/assets/%E7%94%BB%20%231.png"');
+    expect(html).toContain('src="https://github.com/user-attachments/assets/123"');
+    expect(html).toContain('SRC="https://github.com/contributor/fork/raw/head-oid/docs/picture.png"');
+    expect(html).toContain('src="https://github.com/acme/repo/raw/main/images/screenshot.jpg"');
+  });
+
+  it("preserves HTTPS and data URLs, signed query strings, and unrelated attributes", () => {
+    const html = render({
+      bodyHtml: '<!-- <img src="ignored.png"> --><img src="https://host/image?sig=a%2F%2Bb&amp;x=1" alt=\'it says src="ignore.png"\'><img src=data:image/png;base64,AA==>',
+    });
+
+    expect(html).toContain('<!-- <img src="ignored.png"> -->');
+    expect(html).toContain('src="https://host/image?sig=a%2F%2Bb&amp;x=1"');
+    expect(html).toContain('alt=\'it says src="ignore.png"\'');
+    expect(html).toContain('src="data:image/png;base64,AA=="');
+    expect(html).toContain("img-src https: data:");
+  });
+
+  it("normalizes srcset candidates for picture sources and images, keeping data URL commas and descriptors", () => {
+    const html = render({
+      bodyHtml: '<picture><source srcset="a.png 1x, /user-attachments/assets/b 2x, https://cdn/c.png 3x"><img src="a.png" srcset="data:image/png;base64,AA== 1x, //cdn/d.png 2x"></picture>',
+    });
+
+    expect(html).toContain('srcset="https://github.com/acme/repo/raw/head-oid/a.png 1x, https://github.com/user-attachments/assets/b 2x, https://cdn/c.png 3x"');
+    expect(html).toContain('srcset="data:image/png;base64,AA== 1x, https://cdn/d.png 2x"');
+  });
+
+  it("strips oversized inline images before sending HTML to the webview", () => {
+    const oversized = 'A'.repeat(Math.ceil((10 * 1024 * 1024 + 1) * 4 / 3));
+    const html = render({ bodyHtml: `<img src="data:image/png;base64,${oversized}">` });
+
+    expect(html).toContain('<img src="data:,">');
+    expect(html).not.toContain("data:image/png;base64,AAAA");
+  });
+});
+
+it("requests only failed images once and replaces them with the resolved data or a GitHub link", () => {
+  class Image {
+    readonly isConnected = true;
+    src: string;
+    removeAttribute = vi.fn();
+    replaceWith = vi.fn();
+    addEventListener = vi.fn();
+
+    constructor(readonly currentSrc: string) {
+      this.src = currentSrc;
+    }
+
+    closest(selector: string) {
+      return selector === ".timeline .box-body" ? {} : null;
+    }
+  }
+  const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
+  const error = vi.fn();
+  const message = vi.fn();
+  const postMessage = vi.fn();
+  const link = { href: "", textContent: "" };
+  const placeholder = { append: vi.fn() };
+  const composer = { value: "", addEventListener: vi.fn() };
+  let sequence = 0;
+  runInNewContext(script, {
+    acquireVsCodeApi: () => ({ getState: () => undefined, postMessage }),
+    crypto: { randomUUID: () => `image-${++sequence}` },
+    HTMLImageElement: Image,
+    document: {
+      getElementById: (id: string) => ["composer-text", "comment"].includes(id) ? composer : null,
+      querySelectorAll: () => [],
+      querySelector: () => null,
+      addEventListener: error,
+      createElement: (name: string) => name === "a" ? link : placeholder,
+    },
+    window: { addEventListener: message },
+  });
+
+  const captureError = error.mock.calls[0][1];
+  const receive = message.mock.calls.find(([event]) => event === "message")?.[1];
+  const privateImage = new Image("https://github.com/acme/repo/raw/main/image.png");
+  const attachment = new Image("https://github.com/user-attachments/assets/123");
+  expect(error).toHaveBeenCalledWith("error", expect.any(Function), true);
+  expect(postMessage).not.toHaveBeenCalled();
+
+  captureError({ target: privateImage });
+  captureError({ target: privateImage });
+  captureError({ target: attachment });
+  expect(postMessage.mock.calls.map(([payload]) => payload)).toEqual([
+    { command: "resolveImage", src: privateImage.currentSrc, requestId: "image-1" },
+    { command: "resolveImage", src: attachment.currentSrc, requestId: "image-2" },
+  ]);
+
+  receive({ data: { command: "imageResolved", requestId: "image-1", dataUri: "data:image/png;base64,AA==" } });
+  expect(privateImage.src).toBe("data:image/png;base64,AA==");
+  expect(privateImage.removeAttribute).toHaveBeenCalledWith("srcset");
+  expect(privateImage.addEventListener).toHaveBeenCalledWith("error", expect.any(Function), { once: true });
+
+  receive({ data: { command: "imageResolved", requestId: "image-2", url: attachment.currentSrc } });
+  expect(attachment.replaceWith).toHaveBeenCalledExactlyOnceWith(placeholder);
+  expect(link).toEqual({ href: attachment.currentSrc, textContent: "Open on GitHub" });
+  expect(placeholder.append).toHaveBeenCalledWith("Could not load this image. ", link);
+});
+
+describe("inline image lightbox", () => {
+  it("renders the lightbox markup with high-specificity button overrides and excludes lightbox buttons from send() freeze", () => {
+    const html = render();
+
+    expect(html).toContain('id="ghcc-lightbox"');
+    expect(html).toContain(".ghcc-lightbox .ghcc-btn");
+    expect(html).toContain(".ghcc-lightbox .ghcc-swatch");
+    expect(html).toContain(".ghcc-lightbox .lb-nav");
+    expect(html).toContain('!button.closest?.(".ghcc-lightbox")');
+    expect(html).toContain("Nearest-neighbor (P)");
+    expect(html).toContain("cursor: grab;");
+    expect(html).toContain("cursor: pointer;");
+    expect(html).not.toContain("cursor: zoom-in");
+    expect(html).not.toContain("crisp-edges");
+    expect(html).toContain('class="lb-stage ghcc-surface pixelated"');
+    expect(html).toMatch(/id="lb-pixel"[^>]*aria-pressed="true"/);
+
+    const smoothHtml = renderPrDetailsHtml(buildDetails(), NONCE, NOW, createPrDetailsStrings(), undefined, "REBASE", undefined, false);
+    expect(smoothHtml).toContain('class="lb-stage ghcc-surface"');
+    expect(smoothHtml).toMatch(/id="lb-pixel"[^>]*aria-pressed="false"/);
+  });
+
+  it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", async () => {
+    class MockEl {
+      className = "";
+      textContent = "";
+      value = "";
+      disabled = false;
+      href = "";
+      private _src: string | null = null;
+      alt = "";
+      innerHTML = "";
+      hidden = false;
+      width = 0;
+      height = 0;
+      complete = true;
+      isConnected = true;
+      inert = false;
+      dataset: Record<string, string> = {};
+      parentNode: MockEl | null = null;
+      parentElement: MockEl | null = null;
+      children: MockEl[] = [];
+      attrs = new Map<string, string>();
+      listeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+      classes = new Set<string>();
+      rect = { left: 100, top: 100, right: 500, bottom: 400, width: 400, height: 300 };
+      style = { transform: "", setProperty: vi.fn() };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      decode?: () => Promise<void>;
+      focus = vi.fn();
+
+      constructor(
+        public readonly tagName: string,
+        public naturalWidth = 0,
+        public naturalHeight = 0,
+      ) {}
+
+      get src(): string {
+        return this._src ?? "";
+      }
+
+      set src(value: string) {
+        this._src = value;
+      }
+
+      get classList() {
+        return {
+          add: (c: string) => this.classes.add(c),
+          remove: (c: string) => this.classes.delete(c),
+          toggle: (c: string, force?: boolean) => {
+            if (force === undefined) {
+              if (this.classes.has(c)) {
+                this.classes.delete(c);
+              } else {
+                this.classes.add(c);
+              }
+            } else if (force) {
+              this.classes.add(c);
+            } else {
+              this.classes.delete(c);
+            }
+          },
+          contains: (c: string) => this.classes.has(c),
+        };
+      }
+
+      setAttribute(name: string, value: string) {
+        this.attrs.set(name, value);
+        if (name === "src") {
+          this._src = value;
+        }
+      }
+
+      removeAttribute(name: string) {
+        this.attrs.delete(name);
+        if (name === "src") {
+          this._src = null;
+        }
+      }
+
+      getAttribute(name: string) {
+        if (name === "src") {
+          return this._src;
+        }
+        return this.attrs.get(name) ?? (name === "href" ? this.href : null);
+      }
+
+      addEventListener(event: string, fn: (e: Record<string, unknown>) => void) {
+        const list = this.listeners.get(event) ?? [];
+        list.push(fn);
+        this.listeners.set(event, list);
+      }
+
+      emit(event: string, payload: Record<string, unknown> = {}) {
+        if (event === "load") {
+          this.onload?.();
+        } else if (event === "error") {
+          this.onerror?.();
+        }
+        for (const fn of this.listeners.get(event) ?? []) {
+          fn(payload);
+        }
+      }
+
+      insertBefore(node: MockEl, ref: MockEl) {
+        node.parentNode = this;
+        node.parentElement = this;
+        const idx = this.children.indexOf(ref);
+        if (idx >= 0) {
+          this.children.splice(idx, 0, node);
+        } else {
+          this.children.push(node);
+        }
+      }
+
+      appendChild(node: MockEl) {
+        if (node.parentNode) {
+          const oldIdx = node.parentNode.children.indexOf(node);
+          if (oldIdx >= 0) {
+            node.parentNode.children.splice(oldIdx, 1);
+          }
+        }
+        node.parentNode = this;
+        node.parentElement = this;
+        this.children.push(node);
+      }
+
+      closest(selector: string): MockEl | null {
+        if (selector === ".timeline .box-body" && this.className.includes("box-body")) {
+          return this;
+        }
+        if (selector === ".ghcc-inline-img-wrap" && this.className.includes("ghcc-inline-img-wrap")) {
+          return this;
+        }
+        if (selector === ".ghcc-lightbox" && this.className.includes("ghcc-lightbox")) {
+          return this;
+        }
+        if (selector === "a" && this.tagName === "A") {
+          return this;
+        }
+        if (selector === "picture" && this.tagName === "PICTURE") {
+          return this;
+        }
+        return this.parentNode?.closest(selector) ?? null;
+      }
+
+      getBoundingClientRect() {
+        return this.rect;
+      }
+
+      setPointerCapture = vi.fn();
+    }
+
+    class MockImage extends MockEl {
+      get currentSrc() {
+        return this.src;
+      }
+      constructor(src: string, w: number, h: number, alt = "") {
+        super("IMG", w, h);
+        this.src = src;
+        this.alt = alt;
+      }
+    }
+
+    const boxBody = new MockEl("DIV");
+    boxBody.className = "box-body";
+
+    const badge = new MockImage("https://img.shields.io/badge/ci-pass-green.svg", 112, 20, "CI passing");
+    boxBody.appendChild(badge);
+
+    const anchor = new MockEl("A");
+    anchor.href = "https://github.com/acme/repo/blob/main/shot.png";
+    const linkedImg = new MockImage("https://github.com/acme/repo/raw/main/shot.png", 1200, 800, "Screenshot");
+    anchor.appendChild(linkedImg);
+    boxBody.appendChild(anchor);
+
+    const unsafeAnchor = new MockEl("A");
+    unsafeAnchor.href = "javascript:alert(1)";
+    const dataImg = new MockImage("data:image/png;base64,AA==", 400, 300, "Inline Data");
+    unsafeAnchor.appendChild(dataImg);
+    boxBody.appendChild(unsafeAnchor);
+
+    const headerEl = new MockEl("HEADER");
+    headerEl.className = "pr-header";
+    const layoutEl = new MockEl("DIV");
+    layoutEl.className = "layout";
+    const preInertEl = new MockEl("DIV");
+    preInertEl.inert = true;
+    const triggerEl = new MockEl("BUTTON");
+    const lbEl = new MockEl("DIV");
+    lbEl.className = "ghcc-lightbox";
+    const bodyEl = new MockEl("BODY");
+    bodyEl.appendChild(headerEl);
+    bodyEl.appendChild(layoutEl);
+    bodyEl.appendChild(preInertEl);
+    bodyEl.appendChild(lbEl);
+    const lbStage = new MockEl("DIV");
+    lbStage.rect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
+    const lbImg = new MockImage("", 1200, 800);
+    lbImg.rect = { left: 200, top: 150, right: 800, bottom: 650, width: 600, height: 500 };
+    const lbError = new MockEl("DIV");
+    lbError.hidden = true;
+    const lbCounter = new MockEl("SPAN");
+    const lbCaption = new MockEl("SPAN");
+    const lbDim = new MockEl("SPAN");
+    const lbZoomVal = new MockEl("BUTTON");
+    const lbGithub = new MockEl("A");
+    const lbPrev = new MockEl("BUTTON");
+    const lbNext = new MockEl("BUTTON");
+    const lbPixel = new MockEl("BUTTON");
+    const lbClose = new MockEl("BUTTON");
+    const lbZoomIn = new MockEl("BUTTON");
+    const lbZoomOut = new MockEl("BUTTON");
+    const lbFit = new MockEl("BUTTON");
+    [lbZoomVal, lbPrev, lbNext, lbPixel, lbClose, lbZoomIn, lbZoomOut, lbFit].forEach((btn) => lbEl.appendChild(btn));
+    const composer = new MockEl("TEXTAREA");
+    const commentBtn = new MockEl("BUTTON");
+
+    const byId: Record<string, MockEl> = {
+      "ghcc-lightbox": lbEl,
+      "lb-stage": lbStage,
+      "lb-img": lbImg,
+      "lb-error": lbError,
+      "lb-counter": lbCounter,
+      "lb-caption": lbCaption,
+      "lb-dim": lbDim,
+      "lb-zoom-val": lbZoomVal,
+      "lb-github": lbGithub,
+      "lb-prev": lbPrev,
+      "lb-next": lbNext,
+      "lb-pixel": lbPixel,
+      "lb-close": lbClose,
+      "lb-zoom-in": lbZoomIn,
+      "lb-zoom-out": lbZoomOut,
+      "lb-fit": lbFit,
+      "composer-text": composer,
+      comment: commentBtn,
+    };
+
+    const postMessage = vi.fn();
+    const docListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+    const windowListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+    const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
+    const mockDocument = {
+      activeElement: triggerEl,
+      body: bodyEl,
+      getElementById: (id: string) => byId[id] ?? null,
+      querySelector: (selector: string) => (selector === ".layout" ? layoutEl : null),
+      querySelectorAll: (selector: string) => {
+        if (selector === "button") {
+          return [commentBtn, lbClose, lbPixel, lbZoomIn, lbZoomOut, lbFit, lbZoomVal];
+        }
+        if (selector === ".timeline .box-body img") {
+          return [badge, linkedImg, dataImg];
+        }
+        if (selector === ".timeline .box-body .ghcc-inline-img-wrap img") {
+          return [linkedImg, dataImg].filter((img) => Boolean(img.closest(".ghcc-inline-img-wrap")));
+        }
+        return [];
+      },
+      addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => {
+        const list = docListeners.get(event) ?? [];
+        list.push(fn);
+        docListeners.set(event, list);
+      },
+      createElement: (tag: string) => new MockEl(tag.toUpperCase()),
+    };
+
+    runInNewContext(script, {
+      acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage }),
+      crypto: { randomUUID: () => "req-1" },
+      queueMicrotask,
+      setTimeout,
+      clearTimeout,
+      HTMLImageElement: MockImage,
+      document: mockDocument,
+      window: {
+        addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => {
+          const list = windowListeners.get(event) ?? [];
+          list.push(fn);
+          windowListeners.set(event, list);
+        },
+        scrollTo: vi.fn(),
+        scrollY: 0,
+      },
+    });
+
+    // Badge skipped; content images wrapped
+    expect(badge.closest(".ghcc-inline-img-wrap")).toBeNull();
+    const linkedWrap = linkedImg.closest(".ghcc-inline-img-wrap")!;
+    const dataWrap = dataImg.closest(".ghcc-inline-img-wrap")!;
+    expect(linkedWrap).not.toBeNull();
+    expect(dataWrap).not.toBeNull();
+
+    // Cmd+Click preserves native link navigation without opening lightbox
+    const cmdClick = { metaKey: true, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() };
+    linkedWrap.emit("click", cmdClick);
+    expect(cmdClick.preventDefault).not.toHaveBeenCalled();
+    expect(lbEl.classList.contains("open")).toBe(false);
+
+    // Normal left click opens lightbox & uses safe outer <a href>
+    const plainClick = { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() };
+    linkedWrap.emit("click", plainClick);
+    expect(plainClick.preventDefault).toHaveBeenCalledOnce();
+    expect(lbEl.classList.contains("open")).toBe(true);
+    expect(lbCounter.textContent).toBe("1 / 2");
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/blob/main/shot.png");
+
+    // Clicking inside the image bounds must NOT close the lightbox
+    lbStage.emit("click", { target: lbStage, clientX: 400, clientY: 300 });
+    expect(lbEl.classList.contains("open")).toBe(true);
+
+    // Even in fitted state, dragging and releasing outside the image must pan without closing the lightbox
+    lbStage.emit("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+    lbStage.emit("pointermove", { clientX: 450, clientY: 340 });
+    lbStage.emit("pointerup", {});
+    lbStage.emit("click", { target: lbStage, clientX: 10, clientY: 10 });
+    expect(lbEl.classList.contains("open")).toBe(true);
+
+    // Default is nearest-neighbor; toggling off persists via setPixelated and stays off across lbNext & reopen
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("true");
+    lbPixel.emit("click", {});
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+    expect(postMessage).toHaveBeenCalledWith({ command: "setPixelated", value: false });
+
+    // Next image (>64px) with unsafe javascript: anchor + data: src keeps pixelated=false and falls back to prUrl
+    lbNext.emit("click", {});
+    expect(lbCounter.textContent).toBe("2 / 2");
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/pull/42");
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+
+    // Plain click on empty backdrop outside image bounds closes lightbox
+    lbStage.emit("pointerdown", { button: 0, clientX: 20, clientY: 20, pointerId: 2 });
+    lbStage.emit("pointerup", {});
+    lbStage.emit("click", { target: lbStage, clientX: 20, clientY: 20 });
+    expect(lbEl.classList.contains("open")).toBe(false);
+
+    // Reopening another image still keeps pixelated=false and isolates all non-lightbox body children (.pr-header & .layout) / moves focus
+    expect(headerEl.inert).toBe(false);
+    expect(layoutEl.inert).toBe(false);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbEl.inert).toBe(false);
+    expect(lbImg.getAttribute("src")).toBeNull();
+    expect(triggerEl.focus).toHaveBeenCalledOnce();
+    lbClose.focus.mockClear();
+    dataWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    expect(lbStage.classList.contains("pixelated")).toBe(false);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+    expect(headerEl.inert).toBe(true);
+    expect(layoutEl.inert).toBe(true);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbEl.inert).toBe(false);
+    expect(lbClose.focus).toHaveBeenCalledOnce();
+
+    // Host pixelated sync updates lightbox state without echoing back
+    postMessage.mockClear();
+    for (const fn of windowListeners.get("message") ?? []) {
+      fn({ data: { command: "pixelated", value: true } });
+    }
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("true");
+    expect(postMessage).not.toHaveBeenCalled();
+
+    // Lightbox keydown ignores non-Escape shortcuts when focused in an input/textarea, but Escape still closes
+    const inputP = { key: "p", target: composer, preventDefault: vi.fn() };
+    for (const fn of docListeners.get("keydown") ?? []) {
+      fn(inputP);
+    }
+    expect(inputP.preventDefault).not.toHaveBeenCalled();
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+
+    // #lb-img error shows fallback message, disables zoom/pixel controls, keeps close/GitHub usable, and resets on next image
+    lbImg.emit("error", {});
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbError.textContent).toBe("Could not load this image.");
+    expect(lbDim.textContent).toBe("");
+    expect(lbZoomVal.textContent).toBe("—");
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+    expect(lbClose.disabled).toBe(false);
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/pull/42");
+
+    lbNext.emit("click", {});
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // send() freezes page buttons but excludes lightbox buttons
+    composer.value = "Looks good";
+    composer.emit("input", {});
+    commentBtn.emit("click", {});
+    expect(commentBtn.disabled).toBe(true);
+    expect(lbClose.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // Escape closes lightbox and restores body children inert state + focus
+    triggerEl.focus.mockClear();
+    const esc = { key: "Escape", target: composer, preventDefault: vi.fn() };
+    for (const fn of docListeners.get("keydown") ?? []) {
+      fn(esc);
+    }
+    expect(esc.preventDefault).toHaveBeenCalledOnce();
+    expect(lbEl.classList.contains("open")).toBe(false);
+    expect(headerEl.inert).toBe(false);
+    expect(layoutEl.inert).toBe(false);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbImg.getAttribute("src")).toBeNull();
+    expect(triggerEl.focus).toHaveBeenCalledOnce();
+
+    // Reopening the same failed image (complete === true && naturalWidth === 0) keeps error state & disabled zoom/pixel controls
+    lbImg.complete = true;
+    lbImg.naturalWidth = 0;
+    lbImg.naturalHeight = 0;
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbZoomOut.disabled).toBe(true);
+    expect(lbFit.disabled).toBe(true);
+    expect(lbZoomVal.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+
+    lbClose.emit("click", {});
+    expect(lbEl.classList.contains("open")).toBe(false);
+    expect(lbImg.getAttribute("src")).toBeNull();
+
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbError.textContent).toBe("Could not load this image.");
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbZoomOut.disabled).toBe(true);
+    expect(lbFit.disabled).toBe(true);
+    expect(lbZoomVal.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+
+    // Switching from image A to image B ignores late error/load/decode callbacks from image A
+    lbClose.emit("click", {});
+    let rejectDecodeA: ((reason: Error) => void) | null = null;
+    lbImg.complete = false;
+    lbImg.naturalWidth = 0;
+    lbImg.naturalHeight = 0;
+    lbImg.decode = () => new Promise<void>((_resolve, reject) => {
+      rejectDecodeA = reject;
+    });
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    const staleOnErrorA = lbImg.onerror;
+    const staleOnLoadA = lbImg.onload;
+    // Start A's decode() in-flight before switching to B
+    lbImg.naturalWidth = 1200;
+    lbImg.naturalHeight = 800;
+    staleOnLoadA?.();
+    expect(rejectDecodeA).not.toBeNull();
+
+    // Switch to image B and let B succeed
+    lbImg.decode = () => Promise.resolve();
+    lbImg.complete = true;
+    lbImg.naturalWidth = 400;
+    lbImg.naturalHeight = 300;
+    lbNext.emit("click", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbDim.textContent).toBe("400×300");
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // Late error, load, and decode rejection from image A must not overwrite image B
+    staleOnErrorA?.();
+    staleOnLoadA?.();
+    rejectDecodeA!(new Error("stale decode failure"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbDim.textContent).toBe("400×300");
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+  });
+
+  it("replaces out-of-range and surrogate numeric HTML entities with U+FFFD without throwing", () => {
+    expect(decodeHtmlEntities("&#1114112;")).toBe("\uFFFD");
+    expect(decodeHtmlEntities("&#x110000;")).toBe("\uFFFD");
+    expect(decodeHtmlEntities("&#55296;&#xDFFF;")).toBe("\uFFFD\uFFFD");
+    expect(decodeHtmlEntities("&#65;&#x42;&amp;")).toBe("AB&");
+  });
+
+  it("compiles all inline webview scripts cleanly and localizes lightbox and image fallback copy", () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const html = render();
+
+    const scripts = Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g), (match) => match[1].trim()).filter(Boolean);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const inlineScript of scripts) {
+      expect(() => new Script(inlineScript)).not.toThrow();
+    }
+
+    expect(html).toContain('aria-label="图片预览"');
+    expect(html).toContain('aria-label="临近插值 (P)"');
+    expect(html).toContain('"tooLarge":"图片超过 10 MB 预览上限。"');
   });
 });

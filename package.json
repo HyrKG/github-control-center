@@ -130,6 +130,11 @@
         "category": "%extension.name%"
       },
       {
+        "command": "githubControlCenter.openTextDiff",
+        "title": "%commands.openTextDiff%",
+        "category": "%extension.name%"
+      },
+      {
         "command": "githubControlCenter.viewFilesAsList",
         "title": "%commands.viewFilesAsList%",
         "category": "%extension.name%",
@@ -424,6 +429,10 @@
           "when": "false"
         },
         {
+          "command": "githubControlCenter.openTextDiff",
+          "when": "false"
+        },
+        {
           "command": "githubControlCenter.review.addComment",
           "when": "false"
         },
@@ -469,6 +478,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "githubControlCenter.openTextDiff",
+          "when": "(view == githubControlCenter.toReview || view == githubControlCenter.reviewed || view == githubControlCenter.mine) && viewItem == prFile",
+          "group": "1_open"
+        },
         {
           "command": "githubControlCenter.checkoutPr",
           "when": "(view == githubControlCenter.toReview || view == githubControlCenter.reviewed || view == githubControlCenter.mine) && viewItem == pr",

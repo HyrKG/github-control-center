@@ -1,5 +1,6 @@
 import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FileTooLargeError } from "../github/github";
 import { BriefStore } from "../brief/briefState";
 import { DetailsSession } from "./DetailsSession";
 import type { IPrDetails, IPullRequest, UpdateBranchMethod } from "../core/types";
@@ -44,6 +45,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
     baseRefName: "main",
     headRefName: "feature",
     headRepo: "acme/repo",
+    headRefOid: "head-oid",
     isBehindBase: false,
     commitsCount: 1,
     changedFiles: 1,
@@ -73,6 +75,7 @@ function buildPanel() {
     updateDetails: vi.fn(),
     isVisible: true,
     reenableActions: vi.fn(),
+    postImageResolution: vi.fn(),
   };
 }
 
@@ -84,6 +87,7 @@ function buildDeps() {
     panel: buildPanel(),
     getSession: vi.fn().mockResolvedValue({ accessToken: "token" }),
     fetchPrDetails: vi.fn().mockResolvedValue(buildDetails()),
+    fetchFileBytes: vi.fn(),
     loadPrFiles: vi.fn().mockResolvedValue([]),
     ensurePatches: vi.fn().mockResolvedValue(new Map()),
     briefStore: new BriefStore(),
@@ -104,6 +108,7 @@ function buildDeps() {
     notify: { info: vi.fn(), warning: vi.fn(), error: vi.fn() },
     promptModal: vi.fn().mockResolvedValue(true),
     log: vi.fn(),
+    setImagePixelated: vi.fn(),
   };
 }
 
@@ -751,5 +756,96 @@ describe("DetailsSession", () => {
 
       expect(deps.refresh.mock.calls.length).toBe(callsBeforeDispose);
     });
+  });
+});
+
+describe("DetailsSession image resolution", () => {
+  it.each([
+    ["https://github.com/acme/private/blob/main/docs/diagram%20one.svg", "main"],
+    ["https://github.com/acme/private/raw/feature/icons/docs/diagram%20one.svg", "feature/icons"],
+    ["https://raw.githubusercontent.com/acme/private/feature%2Ficons/docs/diagram%20one.svg?token=signed", "feature/icons"],
+    ["https://raw.githubusercontent.com/acme/private/refs/heads/main/docs/diagram%20one.svg", "refs/heads/main"],
+  ])("loads a failed repository image through the API for %s", async (src, ref) => {
+    const deps = buildDeps();
+    deps.fetchPrDetails.mockResolvedValue(buildDetails({ headRefName: "feature/icons" }));
+    deps.fetchFileBytes.mockResolvedValue({ bytes: Buffer.from("<svg/>"), contentType: "image/svg+xml" });
+    const session = new DetailsSession(deps);
+    await session.openPrDetails(buildPr());
+    expect(deps.fetchFileBytes).not.toHaveBeenCalled();
+
+    session.handleMessage({ command: "resolveImage", src, requestId: "image-1" });
+    await flush();
+
+    expect(deps.fetchFileBytes).toHaveBeenCalledExactlyOnceWith("token", "acme/private", "docs/diagram one.svg", ref);
+    expect(deps.panel.postImageResolution).toHaveBeenCalledExactlyOnceWith({
+      requestId: "image-1",
+      url: `https://github.com/acme/private/blob/${encodeURIComponent(ref)}/docs/diagram%20one.svg`,
+      dataUri: "data:image/svg+xml;base64,PHN2Zy8+",
+    });
+  });
+
+  it.each([
+    ["https://github.com/user-attachments/assets/uuid", true],
+    ["https://github.com/acme/repo/assets/123/image", true],
+    ["https://github.com/acme/repo/pull/1", true],
+    ["https://github.com/acme/repo/blob/main/%2e%2e%2fother.png", true],
+    ["https://github.com/acme/repo/blob/main/%E0%A4", true],
+    ["https://github.com.evil.example/acme/repo/blob/main/image.png", false],
+    ["https://evil.example@github.com/acme/repo/blob/main/image.png", false],
+    ["https://github.com:8080/acme/repo/blob/main/image.png", false],
+    ["http://raw.githubusercontent.com/acme/repo/main/image.png", false],
+    ["https://api.github.com/repos/acme/repo/contents/image.png", false],
+  ])("offers a browser fallback without authenticating for %s", async (src, keepImageLink) => {
+    const deps = buildDeps();
+    const session = new DetailsSession(deps);
+    const pr = buildPr();
+    await session.openPrDetails(pr);
+    deps.getSession.mockClear();
+
+    session.handleMessage({ command: "resolveImage", src, requestId: "image-2" });
+    await flush();
+
+    expect(deps.getSession).not.toHaveBeenCalled();
+    expect(deps.fetchFileBytes).not.toHaveBeenCalled();
+    expect(deps.panel.postImageResolution).toHaveBeenCalledExactlyOnceWith({ requestId: "image-2", url: keepImageLink ? src : pr.url });
+  });
+
+  it("returns the GitHub file link on API failure and includes a message when the image exceeds the limit", async () => {
+    const deps = buildDeps();
+    deps.fetchFileBytes
+      .mockRejectedValueOnce(new Error("404"))
+      .mockRejectedValueOnce(new FileTooLargeError());
+    const session = new DetailsSession(deps);
+    await session.openPrDetails(buildPr());
+    const src = "https://github.com/acme/repo/blob/main/image.png";
+
+    session.handleMessage({ command: "resolveImage", src, requestId: "missing" });
+    session.handleMessage({ command: "resolveImage", src, requestId: "large" });
+    await flush();
+
+    expect(deps.panel.postImageResolution).toHaveBeenCalledWith({ requestId: "missing", url: src });
+    expect(deps.panel.postImageResolution).toHaveBeenCalledWith({
+      requestId: "large", url: src, message: "The image exceeds the 10 MB preview limit.",
+    });
+  });
+
+  it("persists setPixelated preference even before PR details load or while a mutation is in flight", async () => {
+    const deps = buildDeps();
+    let resolveComment: () => void = () => undefined;
+    deps.addPrComment.mockImplementation(() => new Promise<void>((resolve) => {
+      resolveComment = resolve;
+    }));
+    const session = new DetailsSession(deps);
+
+    session.handleMessage({ command: "setPixelated", value: false });
+    expect(deps.setImagePixelated).toHaveBeenCalledExactlyOnceWith(false);
+
+    await session.openPrDetails(buildPr());
+    session.handleMessage({ command: "comment", text: "hi" });
+    session.handleMessage({ command: "setPixelated", value: true });
+    expect(deps.setImagePixelated).toHaveBeenNthCalledWith(2, true);
+
+    resolveComment();
+    await flush();
   });
 });

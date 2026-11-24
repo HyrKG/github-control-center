@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import {
   addPrComment,
+  fetchFileBytes,
   fetchFileContent,
   fetchPrDetails,
   fetchPrFilePatches,
@@ -31,6 +32,8 @@ import { applyFilters, partitionReviewed } from "./poll/filters";
 import { NewPrTracker } from "./poll/NewPrTracker";
 import { AsyncOidCache } from "./core/OidCache";
 import { PrContentProvider, fromPrUri, toPrUri } from "./review/PrContentProvider";
+import { createImageViewerStrings, viewerLanguage } from "./core/imageViewerStrings";
+import { imageMimeType, PrImagePreview } from "./review/PrImagePreview";
 import { PrDetailsPanel } from "./panel/PrDetailsPanel";
 import { PollScheduler } from "./poll/PollScheduler";
 import { PrTreeProvider, type FilesLayout, type IFileNode, type TreeNode } from "./tree/PrTreeProvider";
@@ -39,6 +42,7 @@ import { ReviewDecisionTracker } from "./poll/ReviewDecisionTracker";
 import type { IPrFile, IPrFilePatch, IPullRequest } from "./core/types";
 
 const BRIEF_CACHE_STATE_KEY = "githubControlCenter.briefCache";
+const IMAGE_PIXELATED_STATE_KEY = "githubControlCenter.imageViewer.pixelated";
 // config sections that feed the poll pipeline: an event touching only ai.* keys skips the poll
 const NON_AI_SECTIONS = ["badge", "notifications", "mutedRepos", "toReview", "updateBranch", "files"].map(
   (section) => `githubControlCenter.${section}`,
@@ -253,7 +257,25 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  async function openFileDiff(node: IFileNode): Promise<void> {
+  function getImagePixelated(): boolean {
+    const raw = context.globalState.get<boolean>(IMAGE_PIXELATED_STATE_KEY, true);
+    return typeof raw === "boolean" ? raw : true;
+  }
+
+  function setImagePixelated(value: boolean): void {
+    void context.globalState.update(IMAGE_PIXELATED_STATE_KEY, value);
+    imagePreview.syncPixelated(value);
+    detailsPanel.syncPixelated(value);
+  }
+
+  const imagePreview = new PrImagePreview(
+    async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha),
+    createImageViewerStrings,
+    { get: getImagePixelated, set: setImagePixelated },
+    viewerLanguage,
+  );
+
+  async function openFileDiff(node: IFileNode, forceText = false): Promise<void> {
     const { pr, file } = node;
     try {
       reviewController.registerPr(pr);
@@ -265,22 +287,28 @@ export function activate(context: vscode.ExtensionContext): void {
       const patches = await ensurePatches(pr);
       const previousPath = patches.get(file.path)?.previousPath;
       const shared = { prId: pr.id, repo: pr.repo, prNumber: pr.number, headOid: pr.headRefOid };
-      const leftUri = toPrUri({
+      const left = {
         ...shared,
         path: previousPath ?? file.path,
         sha: pr.baseRefOid,
-        side: "LEFT",
+        side: "LEFT" as const,
         isEmpty: file.changeType === "ADDED",
-      });
-      const rightUri = toPrUri({
+      };
+      const right = {
         ...shared,
         path: file.path,
         sha: pr.headRefOid,
-        side: "RIGHT",
+        side: "RIGHT" as const,
         isEmpty: file.changeType === "DELETED",
-      });
+      };
       const basename = file.path.slice(file.path.lastIndexOf("/") + 1);
-      await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, vscode.l10n.t("{0} (PR #{1})", basename, pr.number), { preview: true });
+      const title = vscode.l10n.t("{0} (PR #{1})", basename, pr.number);
+      if (!forceText && [left, right].some((side) => !side.isEmpty && imageMimeType(side.path))) {
+        const head = { ...right, repo: pr.headRepo ?? pr.repo };
+        await imagePreview.open({ key: JSON.stringify([pr.id, file.path]), title, changeType: file.changeType, left, right: head });
+        return;
+      }
+      await vscode.commands.executeCommand("vscode.diff", toPrUri(left), toPrUri(right), title, { preview: true });
     } catch (error) {
       void vscode.window.showErrorMessage(vscode.l10n.t("Failed to open the diff: {0}", toErrorMessage(error)));
     }
@@ -326,7 +354,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const newPrTracker = new NewPrTracker();
   const reviewDecisionTracker = new ReviewDecisionTracker();
   const approvalOverlay = new ApprovalOverlay();
-  const detailsPanel = new PrDetailsPanel(context.extensionUri);
+  const detailsPanel = new PrDetailsPanel(context.extensionUri, getImagePixelated);
   // repos seen in the last raw snapshot (pre-filter, so muted ones stay unmutable from the picker)
   let knownRepos = new Set<string>();
   // results are pinned to the head oid — a push invalidates naturally. Hydrated from globalState
@@ -476,6 +504,7 @@ export function activate(context: vscode.ExtensionContext): void {
     panel: detailsPanel,
     getSession,
     fetchPrDetails,
+    fetchFileBytes,
     loadPrFiles,
     ensurePatches,
     briefStore,
@@ -513,6 +542,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return choice === action;
     },
     log: (message) => output.appendLine(message),
+    setImagePixelated,
   });
 
   detailsPanel.onMessage((message) => detailsSession.handleMessage(message));
@@ -689,6 +719,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("githubControlCenter.openPrDetails", (pr: IPullRequest) => void detailsSession.openPrDetails(pr)),
     vscode.workspace.registerTextDocumentContentProvider(PR_URI_SCHEME, contentProvider),
     vscode.commands.registerCommand("githubControlCenter.openFileDiff", (node: IFileNode) => void openFileDiff(node)),
+    vscode.commands.registerCommand("githubControlCenter.openTextDiff", (node: IFileNode) => void openFileDiff(node, true)),
     vscode.commands.registerCommand("githubControlCenter.review.resolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Resolve conversation"), resolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.unresolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Unresolve conversation"), unresolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.addComment", (reply: vscode.CommentReply) => void handleAddComment(reply, false)),
@@ -706,6 +737,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void ghccConfig().update("files.layout", "tree", vscode.ConfigurationTarget.Global);
     }),
     reviewController,
+    imagePreview,
     pendingStatusBar,
     toReviewView.onDidChangeCheckboxState(handleCheckboxChange),
     reviewedView.onDidChangeCheckboxState(handleCheckboxChange),

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { LocalizedError } from "../core/errors";
+import { MAX_IMAGE_BYTES } from "../core/types";
 import type {
   CiState,
   DiffSide,
@@ -40,6 +41,7 @@ const PR_FIELDS = `
     headRefName
     baseRefOid
     headRefOid
+    headRepository { nameWithOwner }
     author { login }
     repository { nameWithOwner }
     viewerLatestReview { state commit { oid } submittedAt }
@@ -72,6 +74,7 @@ interface IGraphQlPrNode {
   headRefName: string;
   baseRefOid: string;
   headRefOid: string;
+  headRepository?: { nameWithOwner: string } | null;
   author: { login: string } | null;
   repository: { nameWithOwner: string };
   viewerLatestReview: { state: string; commit: { oid: string } | null; submittedAt: string } | null;
@@ -301,17 +304,23 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
 }
 
 const REST_ENDPOINT = "https://api.github.com";
+const REST_TIMEOUT_MS = 30_000;
 // GitHub lists at most 3000 files per PR: 30 pages of 100
 const MAX_FILE_PAGES = 30;
 
-async function getRest(token: string, path: string, accept: string): Promise<Response> {
+async function getRest(token: string, path: string, accept: string, redirect?: RequestRedirect, signal?: AbortSignal): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(REST_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const response = await fetch(`${REST_ENDPOINT}${path}`, {
+    ...(redirect && { redirect }),
+    signal: requestSignal,
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: accept,
     },
   });
   if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
     throw new LocalizedError(
       `GitHub REST request failed with status ${response.status}`,
       vscode.l10n.t("GitHub REST request failed with status {0}", response.status),
@@ -340,10 +349,70 @@ export async function fetchPrFilePatches(token: string, repo: string, prNumber: 
 }
 
 export async function fetchFileContent(token: string, repo: string, path: string, sha: string): Promise<string> {
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   // the raw media type streams the blob directly, avoiding the 1MB base64 JSON cap
-  const response = await getRest(token, `/repos/${repo}/contents/${encodedPath}?ref=${sha}`, "application/vnd.github.raw+json");
+  const response = await getRest(token, fileContentsPath(repo, path, sha), "application/vnd.github.raw+json");
   return response.text();
+}
+
+function fileContentsPath(repo: string, path: string, ref: string): string {
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error(`Invalid repository name: ${repo}`);
+  }
+  const pathSegments = path.split("/");
+  if (pathSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Invalid repository file path: ${path}`);
+  }
+  const encodedRepo = repoParts.map(encodeURIComponent).join("/");
+  const encodedPath = pathSegments.map(encodeURIComponent).join("/");
+  return `/repos/${encodedRepo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`;
+}
+
+export class FileTooLargeError extends LocalizedError {
+  constructor() {
+    super("The image exceeds the 10 MB preview limit.", vscode.l10n.t("The image exceeds the 10 MB preview limit."));
+  }
+}
+
+export interface IFileBytes {
+  bytes: Uint8Array;
+  contentType: string | null;
+}
+
+export async function fetchFileBytes(token: string, repo: string, path: string, ref: string, signal?: AbortSignal): Promise<IFileBytes> {
+  const response = await getRest(token, fileContentsPath(repo, path, ref), "application/vnd.github.raw+json", "error", signal);
+  if (Number(response.headers.get("content-length")) > MAX_IMAGE_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    throw new FileTooLargeError();
+  }
+  // Bound the actual stream too: the length header can be absent or describe compressed bytes.
+  const reader = response.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (reader) {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        size += value.byteLength;
+        if (size > MAX_IMAGE_BYTES) {
+          await reader.cancel().catch(() => {});
+          throw new FileTooLargeError();
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (!(error instanceof FileTooLargeError)) {
+        await reader.cancel().catch(() => {});
+      }
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  return { bytes: Buffer.concat(chunks, size), contentType: response.headers.get("content-type") };
 }
 
 export async function fetchPullRequests(token: string): Promise<IPrSnapshot> {
@@ -684,6 +753,7 @@ function toPullRequest(node: IGraphQlPrNode & { id: string }): IPullRequest {
     title: node.title,
     url: node.url,
     repo: node.repository.nameWithOwner,
+    headRepo: node.headRepository?.nameWithOwner,
     author: node.author?.login ?? vscode.l10n.t("unknown"),
     isDraft: node.isDraft,
     createdAt: node.createdAt,
@@ -743,6 +813,7 @@ function toPrDetails(node: IGraphQlDetailsNode, viewerLogin: string): IPrDetails
     baseRefName: node.baseRefName,
     headRefName: node.headRefName,
     headRepo: node.headRepository?.nameWithOwner ?? node.repository.nameWithOwner,
+    headRefOid: node.headRefOid,
     // Ref.compare works without branch protection; mergeStateStatus only reports BEHIND with strict protection.
     // compare(headRef:) resolves the name inside the BASE repo, so on a cross-fork PR a same-named
     // base-repo branch would be compared instead — skip the check entirely for forks.

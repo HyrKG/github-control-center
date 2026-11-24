@@ -5,7 +5,9 @@ import {
   addReviewThread,
   addReviewThreadReply,
   discardPendingReview,
+  fetchFileBytes,
   fetchFileContent,
+  FileTooLargeError,
   fetchPrDetails,
   fetchPrFilePatches,
   fetchPrFiles,
@@ -22,8 +24,11 @@ import {
   updatePrBranch,
 } from "./github";
 
+import { MAX_IMAGE_BYTES } from "../core/types";
+
 interface IGraphQlNodeOverrides {
   id?: string;
+  headRepository?: { nameWithOwner: string } | null;
   title?: string;
   author?: { login: string } | null;
   rollupState?: string | null;
@@ -47,6 +52,7 @@ function buildNode(overrides: IGraphQlNodeOverrides = {}) {
     headRefOid: "head-oid",
     author: overrides.author === undefined ? { login: "jane" } : overrides.author,
     repository: { nameWithOwner: "acme/repo" },
+    headRepository: overrides.headRepository,
     viewerLatestReview: review
       ? {
           state: review.state,
@@ -105,6 +111,14 @@ describe("fetchPullRequests", () => {
         headRefOid: "head-oid",
       },
     ]);
+  });
+
+  it("keeps the fork repository alongside the base repository", async () => {
+    stubGraphQlData([buildNode({ headRepository: { nameWithOwner: "contributor/fork" } })]);
+
+    const snapshot = await fetchPullRequests("token");
+
+    expect(snapshot.toReview[0]).toMatchObject({ repo: "acme/repo", headRepo: "contributor/fork" });
   });
 
   it("should split results between toReview and mine sections", async () => {
@@ -377,6 +391,7 @@ describe("fetchPrDetails", () => {
       baseRefName: "main",
       headRefName: "feature/thing",
       headRepo: "acme/repo",
+      headRefOid: "head-oid",
       isBehindBase: false,
       commitsCount: 3,
       changedFiles: 3,
@@ -1360,5 +1375,123 @@ describe("mutations", () => {
     stubFetch({ errors: [{ message: "Pull request is not mergeable" }] });
 
     await expect(mergePr("token", "PR_42", "SQUASH")).rejects.toThrow("Pull request is not mergeable");
+  });
+});
+
+describe("fetchFileBytes", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("preserves binary bytes and encodes paths and refs in the authenticated API request", async () => {
+    const bytes = Uint8Array.of(0x89, 0x50, 0, 0xff);
+    const request = vi.fn().mockResolvedValue(new Response(bytes, { headers: { "content-type": "image/png" } }));
+    vi.stubGlobal("fetch", request);
+
+    const result = await fetchFileBytes("token", "acme/repo", "assets/绘图 #1.png", "feature/icons");
+
+    expect([...result.bytes]).toEqual([...bytes]);
+    expect(result.contentType).toBe("image/png");
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      "https://api.github.com/repos/acme/repo/contents/assets/%E7%BB%98%E5%9B%BE%20%231.png?ref=feature%2Ficons",
+      {
+        headers: { Authorization: "Bearer token", Accept: "application/vnd.github.raw+json" },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it("rejects invalid repo names and unsafe path segments before issuing a request", async () => {
+    const request = vi.fn();
+    vi.stubGlobal("fetch", request);
+
+    await expect(fetchFileBytes("token", "invalid-repo", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "a/b/c", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "../repo", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "acme/repo", "", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "/leading.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a//b.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a/./b.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a/../b.png", "main")).rejects.toThrow("Invalid repository file path");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("cancels response bodies on non-2xx statuses, stream errors, and honours abort signals", async () => {
+    const cancel404 = vi.fn();
+    const errorStreamCancel = vi.fn().mockResolvedValue(undefined);
+    const releaseLock = vi.fn();
+    const failedResponse = new Response(new ReadableStream({ cancel: cancel404 }), { status: 404 });
+    const brokenResponse = {
+      ok: true,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockRejectedValue(new Error("socket reset")),
+          cancel: errorStreamCancel,
+          releaseLock,
+        }),
+      },
+    } as unknown as Response;
+    const controller = new AbortController();
+    const request = vi.fn()
+      .mockResolvedValueOnce(failedResponse)
+      .mockResolvedValueOnce(brokenResponse)
+      .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")), { once: true });
+      }));
+    vi.stubGlobal("fetch", request);
+
+    await expect(fetchFileBytes("token", "acme/repo", "missing.png", "main")).rejects.toThrow("404");
+    expect(cancel404).toHaveBeenCalledOnce();
+
+    await expect(fetchFileBytes("token", "acme/repo", "broken.png", "main")).rejects.toThrow("socket reset");
+    expect(errorStreamCancel).toHaveBeenCalledOnce();
+    expect(releaseLock).toHaveBeenCalledOnce();
+
+    const pending = fetchFileBytes("token", "acme/repo", "slow.png", "main", controller.signal);
+    controller.abort(new Error("timed out"));
+    await expect(pending).rejects.toThrow("timed out");
+  });
+
+  it("propagates REST and blocked redirect failures", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockRejectedValueOnce(new TypeError("redirect mode is set to error"));
+    vi.stubGlobal("fetch", request);
+
+    await expect(fetchFileBytes("token", "acme/repo", "missing.png", "main")).rejects.toThrow("404");
+    await expect(fetchFileBytes("token", "acme/repo", "redirect.png", "main")).rejects.toThrow("redirect");
+  });
+
+  it("cancels an oversized response before reading based on its announced length", async () => {
+    const cancel = vi.fn();
+    const stream = new ReadableStream({ cancel });
+    const response = new Response(stream, { headers: { "content-length": String(MAX_IMAGE_BYTES + 1) } });
+    const read = vi.spyOn(response.body!, "getReader");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(fetchFileBytes("token", "acme/repo", "large.png", "main")).rejects.toBeInstanceOf(FileTooLargeError);
+    expect(read).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("allows the exact cap and cancels oversized streams without a length header", async () => {
+    const cancel = vi.fn();
+    const limit = new Uint8Array(MAX_IMAGE_BYTES);
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(limit);
+        controller.enqueue(Uint8Array.of(1));
+      },
+      cancel,
+    });
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(limit))
+      .mockResolvedValueOnce(new Response(stream)));
+
+    await expect(fetchFileBytes("token", "acme/repo", "limit.png", "main")).resolves.toMatchObject({
+      bytes: expect.objectContaining({ byteLength: MAX_IMAGE_BYTES }),
+    });
+    await expect(fetchFileBytes("token", "acme/repo", "large.png", "main")).rejects.toBeInstanceOf(FileTooLargeError);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });

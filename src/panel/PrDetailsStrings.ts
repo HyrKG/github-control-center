@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createImageViewerStrings, viewerLanguage } from "../core/imageViewerStrings";
 import type { MergeMethod, UpdateBranchMethod } from "../core/types";
 
 export function mergeMethodLabels(): Record<MergeMethod, string> {
@@ -17,7 +18,7 @@ export function updateMethodLabels(): Record<UpdateBranchMethod, string> {
 }
 
 export function prDetailsLanguage(): string {
-  return vscode.l10n.bundle ? vscode.env.language : "en";
+  return viewerLanguage();
 }
 
 export type IPrDetailsStrings = ReturnType<typeof createPrDetailsStrings>;
@@ -25,6 +26,7 @@ export type IPrDetailsStrings = ReturnType<typeof createPrDetailsStrings>;
 export function createPrDetailsStrings() {
   return {
     lang: prDetailsLanguage(),
+    imageViewer: createImageViewerStrings(),
     today: vscode.l10n.t("today"),
     yesterday: vscode.l10n.t("yesterday"),
     briefDone: vscode.l10n.t("Already summarized — new commits re-enable it"),

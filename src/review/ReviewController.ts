@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { commentableRanges } from "./diffPatch";
 import { fetchReviewThreads } from "../github/github";
+import { gitHubFileRoot } from "../github/fileUrls";
 import { fromPrUri, toPrUri } from "./PrContentProvider";
 import { PR_URI_SCHEME } from "./prUri";
 import { threadStatus, toThreadAnchor } from "./reviewThreads";
@@ -118,7 +119,7 @@ export class ReviewController implements vscode.Disposable {
     for (const thread of plan.update) {
       const vsThread = state.vsThreads.get(thread.id);
       if (vsThread) {
-        this.applyThreadState(vsThread, thread);
+        this.applyThreadState(pr, vsThread, thread);
       }
     }
 
@@ -152,18 +153,26 @@ export class ReviewController implements vscode.Disposable {
     });
     const range = anchor.isFileLevel ? undefined : new vscode.Range(anchor.startLine0, 0, anchor.endLine0, 0);
     const vsThread = this.controller.createCommentThread(uri, range as vscode.Range, []);
-    this.applyThreadState(vsThread, thread);
+    this.applyThreadState(pr, vsThread, thread);
     return vsThread;
   }
 
-  private applyThreadState(vsThread: vscode.CommentThread, thread: IReviewThread): void {
-    vsThread.comments = thread.comments.map((comment) => ({
-      body: new vscode.MarkdownString(comment.bodyMarkdown),
-      mode: vscode.CommentMode.Preview,
-      author: { name: comment.author },
-      label: comment.isPending ? vscode.l10n.t("Pending") : undefined,
-      timestamp: new Date(comment.createdAt),
-    }));
+  private applyThreadState(pr: IPullRequest, vsThread: vscode.CommentThread, thread: IReviewThread): void {
+    const isBase = (vsThread.uri ? fromPrUri(vsThread.uri).side : thread.side) === "LEFT";
+    const repo = isBase ? pr.repo : pr.headRepo ?? pr.repo;
+    const ref = isBase ? pr.baseRefOid : pr.headRefOid;
+    const baseUri = vscode.Uri.parse(gitHubFileRoot(repo, ref, "raw"));
+    vsThread.comments = thread.comments.map((comment) => {
+      const body = new vscode.MarkdownString(comment.bodyMarkdown);
+      body.baseUri = baseUri;
+      return {
+        body,
+        mode: vscode.CommentMode.Preview,
+        author: { name: comment.author },
+        label: comment.isPending ? vscode.l10n.t("Pending") : undefined,
+        timestamp: new Date(comment.createdAt),
+      };
+    });
     const status = threadStatus(thread);
     vsThread.label = status === "outdated" ? vscode.l10n.t("Outdated") : status === "resolved" ? vscode.l10n.t("Resolved") : "";
     vsThread.state = thread.isResolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;

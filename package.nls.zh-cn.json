@@ -15,6 +15,7 @@
   "commands.openPr": "在 GitHub 上打开",
   "commands.openPrDetails": "打开拉取请求详情",
   "commands.openFileDiff": "打开文件差异",
+  "commands.openTextDiff": "打开文本差异",
   "commands.viewFilesAsList": "以列表显示文件",
   "commands.viewFilesAsTree": "以树形显示文件",
   "commands.review.addComment": "添加审查评论",

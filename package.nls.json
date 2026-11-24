@@ -15,6 +15,7 @@
   "commands.openPr": "Open on GitHub",
   "commands.openPrDetails": "Open Pull Request Details",
   "commands.openFileDiff": "Open File Diff",
+  "commands.openTextDiff": "Open Text Diff",
   "commands.viewFilesAsList": "View Files as List",
   "commands.viewFilesAsTree": "View Files as Tree",
   "commands.review.addComment": "Add Review Comment",

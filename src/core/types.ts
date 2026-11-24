@@ -1,3 +1,5 @@
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
 export type CiState = "SUCCESS" | "FAILURE" | "PENDING" | "NONE";
 
 export interface IPullRequest {
@@ -18,6 +20,7 @@ export interface IPullRequest {
   /** set only on `IPrSnapshot.reviewed` entries: already reviewed, no active re-request */
   isReviewedByMe?: boolean;
   headRefName: string;
+  headRepo?: string;
   baseRefOid: string;
   headRefOid: string;
 }
@@ -137,6 +140,7 @@ export interface IPrDetails {
   baseRefName: string;
   headRefName: string;
   headRepo: string;
+  headRefOid: string;
   isBehindBase: boolean;
   commitsCount: number;
   changedFiles: number;

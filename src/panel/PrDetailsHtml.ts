@@ -1,3 +1,14 @@
+import { escapeHtml } from "../core/html";
+import {
+  IMAGE_VIEWER_CONTROLLER_SCRIPT,
+  IMAGE_VIEWER_ICONS,
+  IMAGE_VIEWER_SHARED_CSS,
+  renderBackdropSwatches,
+  renderZoomToolbarControls,
+  safeJsonForScript,
+} from "../core/imageViewer";
+import { gitHubFileRoot } from "../github/fileUrls";
+import { MAX_IMAGE_BYTES } from "../core/types";
 import type { IBriefState, IPrDetails, IPrTimelineItem, UpdateBranchMethod } from "../core/types";
 import type { IPrDetailsStrings } from "./PrDetailsStrings";
 
@@ -257,18 +268,238 @@ const BASE_STYLE = `
     color: var(--gr-yellow);
   }
   .header-actions { margin-top: 10px; display: flex; gap: 8px; }
+  .image-fallback {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--gr-border);
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.14));
+    color: var(--gr-muted);
+    font-size: 12px;
+  }
+  .image-fallback::before {
+    content: "⚠";
+    font-size: 13px;
+    line-height: 1;
+  }
   .brief-section summary { cursor: pointer; font-weight: 600; color: var(--gr-muted); padding: 8px 12px; }
   .brief-section[open] summary { border-bottom: 1px solid var(--gr-border); }
   .brief-avatar { display: flex; align-items: center; justify-content: center; }
-`;
 
-export function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
+  ${IMAGE_VIEWER_SHARED_CSS}
+
+  .box-body .ghcc-inline-img-wrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    margin: 4px 0;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--gr-border);
+    background-color: var(--ghcc-checker-b);
+    background-image:
+      linear-gradient(45deg, var(--ghcc-checker-a) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--ghcc-checker-a) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--ghcc-checker-a) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--ghcc-checker-a) 75%);
+    background-size: 12px 12px;
+    background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+    vertical-align: top;
+    transition: border-color 0.12s ease;
+  }
+  .box-body .ghcc-inline-img-wrap:hover {
+    border-color: var(--vscode-focusBorder, #007fd4);
+  }
+  .box-body .ghcc-inline-img-wrap img {
+    display: block;
+    max-width: 100%;
+    max-height: 460px;
+    width: auto;
+    height: auto;
+    cursor: pointer;
+  }
+  .ghcc-expand-hint {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(20, 20, 22, 0.72);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+  }
+  .ghcc-expand-hint svg { width: 14px; height: 14px; }
+  .ghcc-inline-img-wrap:hover .ghcc-expand-hint,
+  .ghcc-inline-img-wrap:focus-within .ghcc-expand-hint {
+    opacity: 1;
+  }
+
+  .ghcc-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    background: var(--ghcc-lightbox-scrim);
+    backdrop-filter: blur(4px);
+  }
+  .ghcc-lightbox.open {
+    display: flex;
+  }
+  .ghcc-lightbox [hidden] {
+    display: none !important;
+  }
+  .lb-bar {
+    height: 42px;
+    flex: 0 0 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 14px;
+    background: var(--ghcc-surface-elevated);
+    border-bottom: 1px solid var(--gr-border);
+    user-select: none;
+  }
+  .lb-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .lb-counter {
+    font-family: var(--gr-mono);
+    font-size: 11px;
+    color: var(--gr-muted);
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.16));
+    flex-shrink: 0;
+  }
+  .lb-caption {
+    font-size: 12px;
+    color: var(--vscode-foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lb-dim {
+    font-family: var(--gr-mono);
+    font-size: 11px;
+    color: var(--gr-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .lb-tools {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+  .lb-stage {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+  }
+  .lb-stage.panning { cursor: grabbing; }
+  .ghcc-lightbox .ghcc-btn {
+    height: 26px;
+    min-width: 26px;
+    padding: 0 6px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--vscode-foreground);
+    font-size: 12px;
+  }
+  .ghcc-lightbox .ghcc-btn:hover:not(:disabled) {
+    background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+  }
+  .ghcc-lightbox .ghcc-btn:active:not(:disabled),
+  .ghcc-lightbox .ghcc-btn[aria-pressed="true"] {
+    background: var(--vscode-toolbar-activeBackground, rgba(99, 102, 103, 0.38));
+  }
+  .ghcc-lightbox .ghcc-btn[aria-pressed="true"] {
+    border-color: var(--gr-border);
+  }
+  .ghcc-lightbox .ghcc-btn:disabled {
+    opacity: 0.4;
+  }
+  .ghcc-lightbox .ghcc-swatch {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 3px;
+    border: 1px solid var(--gr-border);
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="checker"] {
+    background-image:
+      linear-gradient(45deg, #b8b8be 25%, transparent 25%),
+      linear-gradient(-45deg, #b8b8be 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #b8b8be 75%),
+      linear-gradient(-45deg, transparent 75%, #b8b8be 75%);
+    background-color: #f0f0f2;
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="light"] {
+    background: #f5f5f7;
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="dark"] {
+    background: #141416;
+  }
+  .ghcc-lightbox .ghcc-swatch[aria-pressed="true"] {
+    border-color: var(--vscode-focusBorder, #007fd4);
+    box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+  }
+  .ghcc-lightbox .lb-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 36px;
+    height: 52px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid var(--gr-border);
+    background: var(--ghcc-surface-elevated);
+    color: var(--vscode-foreground);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0.78;
+    z-index: 10;
+    transition: opacity 0.12s ease;
+  }
+  .ghcc-lightbox .lb-nav:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+  }
+  .ghcc-lightbox .lb-nav.prev { left: 14px; }
+  .ghcc-lightbox .lb-nav.next { right: 14px; }
+  .ghcc-lightbox .lb-nav svg { width: 18px; height: 18px; }
+  .ghcc-lightbox .lb-error {
+    padding: 12px 18px;
+    border-radius: 6px;
+    border: 1px solid var(--gr-red);
+    background: var(--ghcc-surface-elevated);
+    color: var(--vscode-foreground);
+    font-size: 13px;
+  }
+`;
 
 // Escape the translated sentence before inserting markup with already-escaped values.
 function renderSentence(template: string, ...parts: string[]): string {
@@ -712,15 +943,89 @@ function renderSidebar(details: IPrDetails, strings: IPrDetailsStrings): string 
   </aside>`;
 }
 
+function safeCodePoint(codePoint: number): string {
+  if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+    return "\uFFFD";
+  }
+  return String.fromCodePoint(codePoint);
+}
+
 export function decodeHtmlEntities(value: string): string {
   return value
-    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/gi, (_match, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_match, code: string) => safeCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/gi, (_match, hex: string) => safeCodePoint(parseInt(hex, 16)))
     .replaceAll("&quot;", '"')
     .replaceAll("&apos;", "'")
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">")
     .replaceAll("&amp;", "&");
+}
+
+// bodyHTML is already sanitized by GitHub. Match complete tags so quoted attributes and
+// code samples cannot be mistaken for an image tag or a src attribute.
+export function normalizeBodyImages(html: string, fileRoot: string): string {
+  return html.replace(/<!--[\s\S]*?-->|<[a-z][\w:-]*(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, (tag) => {
+    if (!/^<(?:img|source)(?=[\s/>])/i.test(tag)) {
+      return tag;
+    }
+    return tag.replace(/(\s+)([^\s=/>]+)(\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))/g,
+      (attr, space: string, name: string, equals: string, _quoted, double: string | undefined, single: string | undefined, bare: string) => {
+        const attribute = name.toLowerCase();
+        if (attribute !== "src" && attribute !== "srcset") {
+          return attr;
+        }
+        const value = decodeHtmlEntities(double ?? single ?? bare);
+        const normalized = attribute === "src" ? normalizeImageUrl(value, fileRoot) : normalizeSrcset(value, fileRoot);
+        return `${space}${name}${equals}"${escapeHtml(normalized)}"`;
+      });
+  });
+}
+
+function normalizeImageUrl(src: string, fileRoot: string): string {
+  const value = src.trim();
+  if (!value) {
+    return value;
+  }
+  if (/^data:/i.test(value)) {
+    const comma = value.indexOf(",");
+    const payload = value.slice(comma + 1);
+    const size = /;base64$/i.test(value.slice(0, comma))
+      ? Math.floor((payload.length - (payload.match(/={1,2}$/)?.[0].length ?? 0)) * 3 / 4)
+      : Buffer.byteLength(payload.replace(/%[\da-f]{2}/gi, "_"));
+    return size > MAX_IMAGE_BYTES ? "data:," : value;
+  }
+  if (/^[a-z][a-z\d+.-]*:/i.test(value)) {
+    return value;
+  }
+  try {
+    const url = new URL(value, "https://github.com/");
+    return value.startsWith("/") ? url.href : fileRoot + url.pathname.slice(1) + url.search + url.hash;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeSrcset(value: string, fileRoot: string): string {
+  const candidates: string[] = [];
+  let rest = value;
+  for (;;) {
+    // As in HTML's srcset parser, commas inside URL tokens (including data URLs) belong
+    // to the URL. Trailing commas or commas following a descriptor end a candidate.
+    rest = rest.replace(/^[\s,]+/, "");
+    const token = /^\S+/.exec(rest)?.[0];
+    if (!token) {
+      return candidates.join(", ");
+    }
+    rest = rest.slice(token.length);
+    const url = token.replace(/,+$/, "");
+    const end = rest.indexOf(",");
+    const descriptor = token === url ? (end < 0 ? rest : rest.slice(0, end)).trim() : "";
+    if (token === url) {
+      rest = end < 0 ? "" : rest.slice(end + 1);
+    }
+    const normalized = normalizeImageUrl(url, fileRoot);
+    candidates.push(descriptor ? `${normalized} ${descriptor}` : normalized);
+  }
 }
 
 // GitHub ships each ```mermaid fence as a <section> rendered by its own site JS (dead in a webview).
@@ -787,16 +1092,20 @@ export function renderPrDetailsHtml(
   mermaidScriptUri?: string,
   defaultUpdateMethod: UpdateBranchMethod = "REBASE",
   brief?: IBriefState,
+  pixelated = true,
 ): string {
+  const fileRoot = gitHubFileRoot(details.headRepo, details.headRefOid, "raw");
+  const processBody = (html: string) => normalizeBodyImages(replaceMermaidSections(html), fileRoot);
   const processedDetails: IPrDetails = {
     ...details,
-    bodyHtml: replaceMermaidSections(details.bodyHtml),
-    timeline: details.timeline.map((item) => ({ ...item, bodyHtml: replaceMermaidSections(item.bodyHtml) })),
+    bodyHtml: processBody(details.bodyHtml),
+    timeline: details.timeline.map((item) => ({ ...item, bodyHtml: processBody(item.bodyHtml) })),
   };
   const timelineItems = renderTimeline(processedDetails.timeline, processedDetails.url, now, strings);
   const olderLink = processedDetails.timelineTruncated ? `<a class="older-link" href="${escapeHtml(processedDetails.url)}">${escapeHtml(strings.olderConversation)}</a>` : "";
   const mermaidSupport = renderMermaidSupport(processedDetails, nonce, mermaidScriptUri);
 
+  const imageStrings = strings.imageViewer;
   const body = `
   ${renderHeader(processedDetails, strings, brief)}
   <div class="layout">
@@ -811,16 +1120,461 @@ export function renderPrDetailsHtml(
       ${renderComposer(processedDetails, strings)}
     </main>
     ${renderSidebar(processedDetails, strings)}
+  </div>
+  <div class="ghcc-lightbox" id="ghcc-lightbox" role="dialog" aria-modal="true" aria-label="${escapeHtml(imageStrings.imageLightbox)}">
+    <div class="lb-bar">
+      <div class="lb-left">
+        <span class="lb-counter" id="lb-counter" hidden></span>
+        <span class="lb-caption" id="lb-caption"></span>
+        <span class="lb-dim" id="lb-dim"></span>
+      </div>
+      <div class="lb-tools">
+        ${renderBackdropSwatches("lb-swatches", imageStrings)}
+        <span class="ghcc-sep"></span>
+        ${renderZoomToolbarControls("lb", imageStrings, pixelated)}
+        <span class="ghcc-sep"></span>
+        <a class="ghcc-btn" id="lb-github" href="${escapeHtml(processedDetails.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(imageStrings.openGitHub)}" data-tooltip="${escapeHtml(imageStrings.openGitHub)}">${IMAGE_VIEWER_ICONS.externalLink}</a>
+        <button class="ghcc-btn" type="button" id="lb-close" aria-label="${escapeHtml(imageStrings.close)}" data-tooltip="${escapeHtml(imageStrings.close)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.close}</button>
+      </div>
+    </div>
+    <div class="lb-stage ghcc-surface${pixelated ? " pixelated" : ""}" id="lb-stage" data-bg="checker">
+      <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(imageStrings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
+      <img class="canvas-img" id="lb-img" alt="">
+      <div class="lb-error" id="lb-error" hidden></div>
+      <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(imageStrings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
+    </div>
   </div>`;
 
-  // the script only forwards user-typed text, the chosen merge method and a composer-has-text
-  // boolean — never ids or urls; the prKey below stays inside the webview (setState only)
   const script = `
   <script nonce="${nonce}">
     const vscodeApi = acquireVsCodeApi();
-    const prKey = ${JSON.stringify(`${processedDetails.repo}#${processedDetails.number}`)};
+    const prKey = ${safeJsonForScript(`${processedDetails.repo}#${processedDetails.number}`)};
+    const prUrl = ${safeJsonForScript(processedDetails.url)};
+    const EXPAND_ICON_SVG = ${safeJsonForScript(IMAGE_VIEWER_ICONS.expand)};
+    const IMAGE_STRINGS = ${safeJsonForScript(imageStrings)};
     const composerText = document.getElementById("composer-text");
-    const allButtons = Array.from(document.querySelectorAll("button"));
+    const allButtons = Array.from(document.querySelectorAll("button")).filter((button) => !button.closest?.(".ghcc-lightbox"));
+    const requestedImages = new WeakSet();
+    const failingImages = new Map();
+
+    ${IMAGE_VIEWER_CONTROLLER_SCRIPT}
+
+    function showImageFallback(image, url, message) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "image-fallback";
+      const link = document.createElement("a");
+      link.href = url || prUrl;
+      link.textContent = IMAGE_STRINGS.openGitHub;
+      placeholder.append((message || IMAGE_STRINGS.loadFailed) + " ", link);
+      const target = image.closest(".ghcc-inline-img-wrap") || image.closest("picture") || image;
+      const parent = target.parentElement;
+      if (parent?.matches("a") && parent.children.length === 1 && !parent.textContent.trim()) {
+        parent.replaceWith(placeholder);
+      } else {
+        target.replaceWith(placeholder);
+      }
+    }
+
+    function resolveFailedImage(image) {
+      if (!(image instanceof HTMLImageElement) || !image.closest(".timeline .box-body") || requestedImages.has(image)) {
+        return;
+      }
+      requestedImages.add(image);
+      const src = image.currentSrc || image.getAttribute("src") || "";
+      if (/^data:/i.test(src)) {
+        showImageFallback(image, prUrl, src === "data:," ? IMAGE_STRINGS.tooLarge : undefined);
+        return;
+      }
+      const requestId = crypto.randomUUID();
+      failingImages.set(requestId, image);
+      vscodeApi.postMessage({ command: "resolveImage", src, requestId });
+    }
+
+    function resolveSafeExternalUrl(image) {
+      const anchor = image.closest?.("a");
+      const anchorHref = anchor?.getAttribute?.("href") || "";
+      if (/^https?:\\/\\//i.test(anchorHref)) {
+        return anchorHref;
+      }
+      const imgSrc = image.getAttribute?.("src") || image.currentSrc || "";
+      if (/^https?:\\/\\//i.test(imgSrc)) {
+        return imgSrc;
+      }
+      return prUrl;
+    }
+
+    const lbEl = document.getElementById("ghcc-lightbox");
+    const lbStage = document.getElementById("lb-stage");
+    const lbImg = document.getElementById("lb-img");
+    const lbError = document.getElementById("lb-error");
+    const lbCounter = document.getElementById("lb-counter");
+    const lbCaption = document.getElementById("lb-caption");
+    const lbDim = document.getElementById("lb-dim");
+    const lbZoomVal = document.getElementById("lb-zoom-val");
+    const lbGithub = document.getElementById("lb-github");
+    const lbPrev = document.getElementById("lb-prev");
+    const lbNext = document.getElementById("lb-next");
+    const lbPixelBtn = document.getElementById("lb-pixel");
+    const lbCloseBtn = document.getElementById("lb-close");
+    const lbZoomInBtn = document.getElementById("lb-zoom-in");
+    const lbZoomOutBtn = document.getElementById("lb-zoom-out");
+    const lbFitBtn = document.getElementById("lb-fit");
+    const lbSwatches = Array.from(document.querySelectorAll("#lb-swatches .ghcc-swatch"));
+
+    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)}, failed: false, open: false };
+    let lbCtrl = null;
+    let lbLoadToken = 0;
+    let inertedElements = [];
+    let lastFocusedElement = null;
+
+    function collectLightboxImages() {
+      return Array.from(document.querySelectorAll(".timeline .box-body .ghcc-inline-img-wrap img"))
+        .filter((img) => img.isConnected && img.naturalWidth > 0);
+    }
+
+    function applyLightboxPixelated(next) {
+      lbState.pixelated = Boolean(next);
+      lbPixelBtn?.setAttribute("aria-pressed", String(lbState.pixelated));
+      lbStage?.classList.toggle("pixelated", lbState.pixelated);
+      if (lbEl?.classList.contains("open") && lbCtrl && !lbState.failed) {
+        lbCtrl.refitIfFitted();
+      }
+    }
+
+    function setLightboxFailed(failed) {
+      lbState.failed = failed;
+      if (lbImg) {
+        lbImg.hidden = failed;
+      }
+      if (lbError) {
+        lbError.hidden = !failed;
+        lbError.textContent = failed ? IMAGE_STRINGS.loadFailed : "";
+      }
+      [lbZoomOutBtn, lbZoomVal, lbZoomInBtn, lbFitBtn, lbPixelBtn].forEach((btn) => {
+        if (btn) {
+          btn.disabled = failed;
+        }
+      });
+      if (failed) {
+        if (lbDim) {
+          lbDim.textContent = "";
+        }
+        if (lbZoomVal) {
+          lbZoomVal.textContent = "—";
+        }
+      }
+    }
+
+    function closeLightbox() {
+      if (!lbEl || !lbEl.classList.contains("open")) {
+        return;
+      }
+      lbLoadToken += 1;
+      lbState.open = false;
+      lbEl.classList.remove("open");
+      if (lbImg) {
+        lbImg.onload = null;
+        lbImg.onerror = null;
+        lbImg.removeAttribute("src");
+      }
+      for (const el of inertedElements) {
+        el.inert = false;
+      }
+      inertedElements = [];
+      const target = lastFocusedElement;
+      lastFocusedElement = null;
+      if (target && target.isConnected !== false && typeof target.focus === "function") {
+        target.focus();
+      }
+    }
+
+    function showLightboxIndex(index) {
+      if (!lbEl || !lbStage || !lbImg || !lbCtrl || lbState.items.length === 0) {
+        return;
+      }
+      const wasOpen = lbEl.classList.contains("open");
+      if (!wasOpen) {
+        lastFocusedElement = document.activeElement || null;
+      }
+      lbState.index = ((index % lbState.items.length) + lbState.items.length) % lbState.items.length;
+      const item = lbState.items[lbState.index];
+      const token = ++lbLoadToken;
+      lbState.open = true;
+      lbEl.classList.add("open");
+      if (!wasOpen) {
+        inertedElements = [];
+        for (const el of Array.from(document.body?.children || [])) {
+          if (el !== lbEl && !el.inert) {
+            el.inert = true;
+            inertedElements.push(el);
+          }
+        }
+        lbCloseBtn?.focus?.();
+      }
+      setLightboxFailed(false);
+      const multi = lbState.items.length > 1;
+      if (lbCounter) {
+        lbCounter.textContent = (lbState.index + 1) + " / " + lbState.items.length;
+        lbCounter.hidden = !multi;
+      }
+      if (lbPrev) {
+        lbPrev.hidden = !multi;
+      }
+      if (lbNext) {
+        lbNext.hidden = !multi;
+      }
+      if (lbCaption) {
+        lbCaption.textContent = item.alt || "";
+      }
+      if (lbGithub) {
+        lbGithub.href = item.href;
+      }
+      lbStage.classList.toggle("pixelated", lbState.pixelated);
+      lbPixelBtn?.setAttribute("aria-pressed", String(lbState.pixelated));
+
+      const applyLoaded = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
+        const nw = lbImg.naturalWidth || item.w || 0;
+        const nh = lbImg.naturalHeight || item.h || 0;
+        if (nw > 0 && nh > 0) {
+          lbImg.width = nw;
+          lbImg.height = nh;
+          if (lbDim) {
+            lbDim.textContent = nw + "×" + nh;
+          }
+          lbCtrl.fit();
+        } else {
+          setLightboxFailed(true);
+        }
+      };
+      const onError = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
+        setLightboxFailed(true);
+      };
+      const onLoad = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
+        if (typeof lbImg.decode === "function") {
+          Promise.resolve(lbImg.decode()).then(applyLoaded, onError);
+        } else {
+          applyLoaded();
+        }
+      };
+      lbImg.onload = onLoad;
+      lbImg.onerror = onError;
+      lbImg.alt = item.alt || "";
+      const targetSrc = item.src || "";
+      if (!targetSrc) {
+        lbImg.removeAttribute("src");
+        setLightboxFailed(true);
+        return;
+      }
+      if (lbImg.getAttribute("src") === targetSrc) {
+        lbImg.removeAttribute("src");
+      }
+      lbImg.src = targetSrc;
+      if (lbImg.complete) {
+        if (lbImg.naturalWidth > 0) {
+          onLoad();
+        } else {
+          queueMicrotask(() => {
+            if (token === lbLoadToken && lbState.open && lbImg.complete && !(lbImg.naturalWidth > 0)) {
+              setLightboxFailed(true);
+            }
+          });
+        }
+      }
+    }
+
+    function openLightboxForImage(clickedImg) {
+      if (!lbEl || !lbStage || !lbImg || !lbCtrl) {
+        return;
+      }
+      const images = collectLightboxImages();
+      const idx = images.indexOf(clickedImg);
+      if (idx < 0) {
+        return;
+      }
+      lbState.items = images.map((img) => ({
+        src: img.currentSrc || img.getAttribute("src") || "",
+        alt: img.alt || "",
+        href: resolveSafeExternalUrl(img),
+        w: img.naturalWidth,
+        h: img.naturalHeight,
+      }));
+      showLightboxIndex(idx);
+    }
+
+    if (lbEl && lbStage && lbImg) {
+      lbCtrl = createImageTransformController({
+        getViewportRect: () => lbStage.getBoundingClientRect(),
+        getRefSize: () => {
+          const nw = lbImg.naturalWidth || lbImg.width;
+          const nh = lbImg.naturalHeight || lbImg.height;
+          return nw && nh ? { w: nw, h: nh } : null;
+        },
+        onUpdate: (st) => {
+          const tx = lbState.pixelated ? Math.round(st.tx) : st.tx;
+          const ty = lbState.pixelated ? Math.round(st.ty) : st.ty;
+          lbImg.style.transform = "translate(" + tx + "px, " + ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
+          lbImg.style.setProperty("--ghcc-scale", String(st.scale));
+          if (lbZoomVal) {
+            lbZoomVal.textContent = Math.round(st.scale * 100) + "%";
+          }
+        },
+      });
+      lbCtrl.bindViewport(lbStage);
+
+      lbSwatches.forEach((sw) => {
+        sw.addEventListener("click", () => {
+          lbState.bg = sw.dataset.bg;
+          lbSwatches.forEach((b) => b.setAttribute("aria-pressed", String(b === sw)));
+          lbStage.dataset.bg = lbState.bg;
+        });
+      });
+      lbZoomInBtn?.addEventListener("click", () => lbCtrl.stepZoom(1));
+      lbZoomOutBtn?.addEventListener("click", () => lbCtrl.stepZoom(-1));
+      lbFitBtn?.addEventListener("click", () => lbCtrl.fit());
+      lbZoomVal?.addEventListener("click", () => lbCtrl.toggleFitOneToOne());
+      lbPixelBtn?.addEventListener("click", () => {
+        applyLightboxPixelated(!lbState.pixelated);
+        vscodeApi.postMessage({ command: "setPixelated", value: lbState.pixelated });
+      });
+      lbCloseBtn?.addEventListener("click", closeLightbox);
+      lbPrev?.addEventListener("click", () => showLightboxIndex(lbState.index - 1));
+      lbNext?.addEventListener("click", () => showLightboxIndex(lbState.index + 1));
+      let stagePointerDown = null;
+      lbStage.addEventListener("pointerdown", (event) => {
+        stagePointerDown = { x: event.clientX, y: event.clientY };
+      });
+      lbStage.addEventListener("click", (event) => {
+        const down = stagePointerDown;
+        stagePointerDown = null;
+        if (event.target !== lbStage || lbCtrl.consumeJustDragged()) {
+          return;
+        }
+        if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) >= GHCC_DRAG_THRESHOLD) {
+          return;
+        }
+        const rect = lbImg.getBoundingClientRect();
+        const onImage =
+          !lbState.failed &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom;
+        if (!onImage) {
+          closeLightbox();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (!lbEl.classList.contains("open") || event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeLightbox();
+          return;
+        }
+        const target = event.target;
+        if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) {
+          return;
+        }
+        if (event.key === "ArrowLeft") {
+          if (lbState.items.length > 1) {
+            event.preventDefault();
+            showLightboxIndex(lbState.index - 1);
+          }
+        } else if (event.key === "ArrowRight") {
+          if (lbState.items.length > 1) {
+            event.preventDefault();
+            showLightboxIndex(lbState.index + 1);
+          }
+        } else if (lbState.failed) {
+          return;
+        } else if (event.key === "+" || event.key === "=") {
+          event.preventDefault();
+          lbCtrl.stepZoom(1);
+        } else if (event.key === "-") {
+          event.preventDefault();
+          lbCtrl.stepZoom(-1);
+        } else if (event.key === "0") {
+          event.preventDefault();
+          lbCtrl.fit();
+        } else if (event.key === "1") {
+          event.preventDefault();
+          lbCtrl.setZoom(1);
+        } else if (event.key === "p" || event.key === "P") {
+          event.preventDefault();
+          lbPixelBtn?.click();
+        }
+      });
+
+      window.addEventListener("resize", () => {
+        if (lbEl.classList.contains("open")) {
+          lbCtrl.refitIfFitted();
+        }
+      });
+    }
+
+    function enhanceInlineImage(image) {
+      if (
+        !(image instanceof HTMLImageElement) ||
+        !image.isConnected ||
+        !image.closest?.(".timeline .box-body") ||
+        image.closest?.(".ghcc-inline-img-wrap")
+      ) {
+        return;
+      }
+      if (!image.complete || image.naturalWidth === 0) {
+        return;
+      }
+      if (image.naturalHeight > 0 && image.naturalHeight <= 36 && image.naturalWidth <= 200) {
+        return;
+      }
+      const wrapTarget = image.closest?.("picture") || image;
+      const parent = wrapTarget.parentNode;
+      if (!parent) {
+        return;
+      }
+      const wrap = document.createElement("span");
+      wrap.className = "ghcc-inline-img-wrap";
+      parent.insertBefore(wrap, wrapTarget);
+      wrap.appendChild(wrapTarget);
+
+      const hint = document.createElement("span");
+      hint.className = "ghcc-expand-hint";
+      hint.setAttribute("aria-hidden", "true");
+      hint.innerHTML = EXPAND_ICON_SVG;
+      wrap.appendChild(hint);
+
+      wrap.addEventListener("click", (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        openLightboxForImage(image);
+      });
+    }
+
+    document.addEventListener("error", (event) => resolveFailedImage(event.target), true);
+    document.querySelectorAll(".timeline .box-body img").forEach((image) => {
+      if (image.complete && image.naturalWidth === 0 && (image.currentSrc || image.getAttribute("src"))) {
+        resolveFailedImage(image);
+      } else if (image.complete && image.naturalWidth > 0) {
+        enhanceInlineImage(image);
+      } else {
+        image.addEventListener("load", () => enhanceInlineImage(image), { once: true });
+      }
+    });
 
     // reenable must restore exactly what send froze: buttons rendered disabled by design
     // (brief pending/done) stay disabled when a confirmation is cancelled or a mutation fails
@@ -926,6 +1680,31 @@ export function renderPrDetailsHtml(
     // the extension re-enables the buttons when a confirmation is cancelled or a mutation fails,
     // so the typed comment survives instead of being wiped by a full re-render
     window.addEventListener("message", (event) => {
+      if (event.data?.command === "pixelated" && typeof event.data.value === "boolean") {
+        applyLightboxPixelated(event.data.value);
+        return;
+      }
+      if (event.data?.command === "imageResolved") {
+        const { requestId, dataUri, url, message } = event.data;
+        const image = failingImages.get(requestId);
+        failingImages.delete(requestId);
+        if (!image?.isConnected) {
+          return;
+        }
+        if (!dataUri) {
+          showImageFallback(image, url, message);
+          return;
+        }
+        image.addEventListener("error", () => showImageFallback(image, url), { once: true });
+        image.addEventListener("load", () => enhanceInlineImage(image), { once: true });
+        image.closest("picture")?.querySelectorAll("source").forEach((source) => source.remove());
+        image.removeAttribute("srcset");
+        image.src = dataUri;
+        if (image.complete && image.naturalWidth > 0) {
+          enhanceInlineImage(image);
+        }
+        return;
+      }
       if (event.data && event.data.command === "reenable") {
         frozenButtons.forEach((button) => { button.disabled = false; });
         frozenButtons = [];

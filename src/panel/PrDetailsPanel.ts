@@ -11,7 +11,16 @@ export type IPanelMessage =
   | { command: "updateBranch"; method: UpdateBranchMethod }
   | { command: "checkout" }
   | { command: "brief" }
+  | { command: "resolveImage"; src: string; requestId: string }
+  | { command: "setPixelated"; value: boolean }
   | { command: "composerState"; hasText: boolean };
+
+export interface IImageResolution {
+  requestId: string;
+  url: string;
+  dataUri?: string;
+  message?: string;
+}
 
 export function formatPrTabTitle(pr: { repo: string; title: string; number: number }): string {
   return vscode.l10n.t("{0} · {1} #{2}", pr.repo, pr.title, pr.number);
@@ -21,7 +30,10 @@ export class PrDetailsPanel {
   private panel: vscode.WebviewPanel | undefined;
   private messageHandler: ((message: IPanelMessage) => void) | undefined;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly getPixelated: () => boolean = () => true,
+  ) {}
 
   onMessage(handler: (message: IPanelMessage) => void): void {
     this.messageHandler = handler;
@@ -55,6 +67,14 @@ export class PrDetailsPanel {
     void this.panel?.webview.postMessage({ command: "reenable" });
   }
 
+  postImageResolution(result: IImageResolution): void {
+    void this.panel?.webview.postMessage({ command: "imageResolved", ...result });
+  }
+
+  syncPixelated(value: boolean): void {
+    void this.panel?.webview.postMessage({ command: "pixelated", value });
+  }
+
   dispose(): void {
     this.panel?.dispose();
   }
@@ -65,7 +85,16 @@ export class PrDetailsPanel {
       .getConfiguration("githubControlCenter")
       .get<UpdateBranchMethod>("updateBranch.defaultMethod", "REBASE");
     panel.title = formatPrTabTitle(details);
-    panel.webview.html = renderPrDetailsHtml(details, crypto.randomUUID(), Date.now(), createPrDetailsStrings(), mermaidScriptUri, defaultUpdateMethod, brief);
+    panel.webview.html = renderPrDetailsHtml(
+      details,
+      crypto.randomUUID(),
+      Date.now(),
+      createPrDetailsStrings(),
+      mermaidScriptUri,
+      defaultUpdateMethod,
+      brief,
+      this.getPixelated(),
+    );
   }
 
   private render(title: string, html: string): void {
