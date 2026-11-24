@@ -914,3 +914,280 @@ it("requests only failed images once and replaces them with the resolved data or
   expect(link).toEqual({ href: attachment.currentSrc, textContent: "Open on GitHub" });
   expect(placeholder.append).toHaveBeenCalledWith("Could not load this image. ", link);
 });
+
+describe("inline image lightbox", () => {
+  it("renders the lightbox markup with high-specificity button overrides and excludes lightbox buttons from send() freeze", () => {
+    const html = render();
+
+    expect(html).toContain('id="ghcc-lightbox"');
+    expect(html).toContain(".ghcc-lightbox .ghcc-btn");
+    expect(html).toContain(".ghcc-lightbox .ghcc-swatch");
+    expect(html).toContain(".ghcc-lightbox .lb-nav");
+    expect(html).toContain('!button.closest?.(".ghcc-lightbox")');
+  });
+
+  it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", () => {
+    class MockEl {
+      className = "";
+      textContent = "";
+      value = "";
+      disabled = false;
+      href = "";
+      src = "";
+      alt = "";
+      innerHTML = "";
+      hidden = false;
+      width = 0;
+      height = 0;
+      complete = true;
+      isConnected = true;
+      dataset: Record<string, string> = {};
+      parentNode: MockEl | null = null;
+      parentElement: MockEl | null = null;
+      children: MockEl[] = [];
+      attrs = new Map<string, string>();
+      listeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+      classes = new Set<string>();
+      rect = { left: 100, top: 100, right: 500, bottom: 400, width: 400, height: 300 };
+      style = { transform: "", setProperty: vi.fn() };
+      onload: (() => void) | null = null;
+
+      constructor(
+        public readonly tagName: string,
+        public naturalWidth = 0,
+        public naturalHeight = 0,
+      ) {}
+
+      get classList() {
+        return {
+          add: (c: string) => this.classes.add(c),
+          remove: (c: string) => this.classes.delete(c),
+          toggle: (c: string, force?: boolean) => {
+            if (force === undefined) {
+              if (this.classes.has(c)) {
+                this.classes.delete(c);
+              } else {
+                this.classes.add(c);
+              }
+            } else if (force) {
+              this.classes.add(c);
+            } else {
+              this.classes.delete(c);
+            }
+          },
+          contains: (c: string) => this.classes.has(c),
+        };
+      }
+
+      setAttribute(name: string, value: string) {
+        this.attrs.set(name, value);
+      }
+
+      getAttribute(name: string) {
+        return this.attrs.get(name) ?? (name === "href" ? this.href : name === "src" ? this.src : null);
+      }
+
+      addEventListener(event: string, fn: (e: Record<string, unknown>) => void) {
+        const list = this.listeners.get(event) ?? [];
+        list.push(fn);
+        this.listeners.set(event, list);
+      }
+
+      emit(event: string, payload: Record<string, unknown> = {}) {
+        for (const fn of this.listeners.get(event) ?? []) {
+          fn(payload);
+        }
+      }
+
+      insertBefore(node: MockEl, ref: MockEl) {
+        node.parentNode = this;
+        node.parentElement = this;
+        const idx = this.children.indexOf(ref);
+        if (idx >= 0) {
+          this.children.splice(idx, 0, node);
+        } else {
+          this.children.push(node);
+        }
+      }
+
+      appendChild(node: MockEl) {
+        if (node.parentNode) {
+          const oldIdx = node.parentNode.children.indexOf(node);
+          if (oldIdx >= 0) {
+            node.parentNode.children.splice(oldIdx, 1);
+          }
+        }
+        node.parentNode = this;
+        node.parentElement = this;
+        this.children.push(node);
+      }
+
+      closest(selector: string): MockEl | null {
+        if (selector === ".timeline .box-body" && this.className.includes("box-body")) {
+          return this;
+        }
+        if (selector === ".ghcc-inline-img-wrap" && this.className.includes("ghcc-inline-img-wrap")) {
+          return this;
+        }
+        if (selector === "a" && this.tagName === "A") {
+          return this;
+        }
+        if (selector === "picture" && this.tagName === "PICTURE") {
+          return this;
+        }
+        return this.parentNode?.closest(selector) ?? null;
+      }
+
+      getBoundingClientRect() {
+        return this.rect;
+      }
+
+      setPointerCapture = vi.fn();
+    }
+
+    class MockImage extends MockEl {
+      get currentSrc() {
+        return this.src;
+      }
+      constructor(src: string, w: number, h: number, alt = "") {
+        super("IMG", w, h);
+        this.src = src;
+        this.alt = alt;
+      }
+    }
+
+    const boxBody = new MockEl("DIV");
+    boxBody.className = "box-body";
+
+    const badge = new MockImage("https://img.shields.io/badge/ci-pass-green.svg", 112, 20, "CI passing");
+    boxBody.appendChild(badge);
+
+    const anchor = new MockEl("A");
+    anchor.href = "https://github.com/acme/repo/blob/main/shot.png";
+    const linkedImg = new MockImage("https://github.com/acme/repo/raw/main/shot.png", 1200, 800, "Screenshot");
+    anchor.appendChild(linkedImg);
+    boxBody.appendChild(anchor);
+
+    const unsafeAnchor = new MockEl("A");
+    unsafeAnchor.href = "javascript:alert(1)";
+    const dataImg = new MockImage("data:image/png;base64,AA==", 400, 300, "Inline Data");
+    unsafeAnchor.appendChild(dataImg);
+    boxBody.appendChild(unsafeAnchor);
+
+    const lbEl = new MockEl("DIV");
+    const lbStage = new MockEl("DIV");
+    lbStage.rect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
+    const lbImg = new MockImage("", 1200, 800);
+    lbImg.rect = { left: 200, top: 150, right: 800, bottom: 650, width: 600, height: 500 };
+    const lbCounter = new MockEl("SPAN");
+    const lbCaption = new MockEl("SPAN");
+    const lbDim = new MockEl("SPAN");
+    const lbZoomVal = new MockEl("BUTTON");
+    const lbGithub = new MockEl("A");
+    const lbPrev = new MockEl("BUTTON");
+    const lbNext = new MockEl("BUTTON");
+    const lbPixel = new MockEl("BUTTON");
+    const lbClose = new MockEl("BUTTON");
+    const lbZoomIn = new MockEl("BUTTON");
+    const lbZoomOut = new MockEl("BUTTON");
+    const lbFit = new MockEl("BUTTON");
+    const composer = new MockEl("TEXTAREA");
+    const commentBtn = new MockEl("BUTTON");
+
+    const byId: Record<string, MockEl> = {
+      "ghcc-lightbox": lbEl,
+      "lb-stage": lbStage,
+      "lb-img": lbImg,
+      "lb-counter": lbCounter,
+      "lb-caption": lbCaption,
+      "lb-dim": lbDim,
+      "lb-zoom-val": lbZoomVal,
+      "lb-github": lbGithub,
+      "lb-prev": lbPrev,
+      "lb-next": lbNext,
+      "lb-pixel": lbPixel,
+      "lb-close": lbClose,
+      "lb-zoom-in": lbZoomIn,
+      "lb-zoom-out": lbZoomOut,
+      "lb-fit": lbFit,
+      "composer-text": composer,
+      comment: commentBtn,
+    };
+
+    const docListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+    const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
+
+    runInNewContext(script, {
+      acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage: vi.fn() }),
+      crypto: { randomUUID: () => "req-1" },
+      setTimeout,
+      clearTimeout,
+      HTMLImageElement: MockImage,
+      document: {
+        getElementById: (id: string) => byId[id] ?? null,
+        querySelector: () => null,
+        querySelectorAll: (selector: string) => {
+          if (selector === ".timeline .box-body img") {
+            return [badge, linkedImg, dataImg];
+          }
+          if (selector === ".timeline .box-body .ghcc-inline-img-wrap img") {
+            return [linkedImg, dataImg].filter((img) => Boolean(img.closest(".ghcc-inline-img-wrap")));
+          }
+          return [];
+        },
+        addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => {
+          const list = docListeners.get(event) ?? [];
+          list.push(fn);
+          docListeners.set(event, list);
+        },
+        createElement: (tag: string) => new MockEl(tag.toUpperCase()),
+      },
+      window: { addEventListener: vi.fn(), scrollTo: vi.fn(), scrollY: 0 },
+    });
+
+    // Badge skipped; content images wrapped
+    expect(badge.closest(".ghcc-inline-img-wrap")).toBeNull();
+    const linkedWrap = linkedImg.closest(".ghcc-inline-img-wrap")!;
+    const dataWrap = dataImg.closest(".ghcc-inline-img-wrap")!;
+    expect(linkedWrap).not.toBeNull();
+    expect(dataWrap).not.toBeNull();
+
+    // Cmd+Click preserves native link navigation without opening lightbox
+    const cmdClick = { metaKey: true, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() };
+    linkedWrap.emit("click", cmdClick);
+    expect(cmdClick.preventDefault).not.toHaveBeenCalled();
+    expect(lbEl.classList.contains("open")).toBe(false);
+
+    // Normal left click opens lightbox & uses safe outer <a href>
+    const plainClick = { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() };
+    linkedWrap.emit("click", plainClick);
+    expect(plainClick.preventDefault).toHaveBeenCalledOnce();
+    expect(lbEl.classList.contains("open")).toBe(true);
+    expect(lbCounter.textContent).toBe("1 / 2");
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/blob/main/shot.png");
+
+    // Clicking inside the image bounds (e.g. single click or double-click) must NOT close the lightbox
+    lbStage.emit("click", { target: lbStage, clientX: 400, clientY: 300 });
+    expect(lbEl.classList.contains("open")).toBe(true);
+
+    // Zoom to 100% (1200x800 > 1000x800 viewport => pannable), drag and release outside the image: must NOT close
+    lbZoomVal.emit("click", {});
+    expect(lbZoomVal.textContent).toBe("100%");
+    lbStage.emit("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+    lbStage.emit("pointermove", { clientX: 450, clientY: 340 });
+    lbStage.emit("pointerup", {});
+    lbStage.emit("click", { target: lbStage, clientX: 10, clientY: 10 });
+    expect(lbEl.classList.contains("open")).toBe(true);
+
+    // Next image with unsafe javascript: anchor + data: src falls back to prUrl
+    lbNext.emit("click", {});
+    expect(lbCounter.textContent).toBe("2 / 2");
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/pull/42");
+
+    // Plain click on empty backdrop outside image bounds closes lightbox
+    lbStage.emit("pointerdown", { button: 0, clientX: 20, clientY: 20, pointerId: 2 });
+    lbStage.emit("pointerup", {});
+    lbStage.emit("click", { target: lbStage, clientX: 20, clientY: 20 });
+    expect(lbEl.classList.contains("open")).toBe(false);
+  });
+});

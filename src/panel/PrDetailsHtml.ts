@@ -1,4 +1,13 @@
 import { escapeHtml } from "../core/html";
+import {
+  DEFAULT_IMAGE_VIEWER_STRINGS,
+  IMAGE_VIEWER_CONTROLLER_SCRIPT,
+  IMAGE_VIEWER_ICONS,
+  IMAGE_VIEWER_SHARED_CSS,
+  renderBackdropSwatches,
+  renderZoomToolbarControls,
+  safeJsonForScript,
+} from "../core/imageViewer";
 import { gitHubFileRoot } from "../github/fileUrls";
 import { MAX_IMAGE_BYTES } from "../core/types";
 import type { IBriefState, IPrDetails, IPrTimelineItem, MergeMethod, UpdateBranchMethod } from "../core/types";
@@ -290,10 +299,230 @@ const BASE_STYLE = `
     color: var(--gr-yellow);
   }
   .header-actions { margin-top: 10px; display: flex; gap: 8px; }
-  .image-fallback { color: var(--gr-muted); }
+  .image-fallback {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--gr-border);
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.14));
+    color: var(--gr-muted);
+    font-size: 12px;
+  }
+  .image-fallback::before {
+    content: "⚠";
+    font-size: 13px;
+    line-height: 1;
+  }
   .brief-section summary { cursor: pointer; font-weight: 600; color: var(--gr-muted); padding: 8px 12px; }
   .brief-section[open] summary { border-bottom: 1px solid var(--gr-border); }
   .brief-avatar { display: flex; align-items: center; justify-content: center; }
+
+  ${IMAGE_VIEWER_SHARED_CSS}
+
+  .box-body .ghcc-inline-img-wrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    margin: 4px 0;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--gr-border);
+    background-color: var(--ghcc-checker-b);
+    background-image:
+      linear-gradient(45deg, var(--ghcc-checker-a) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--ghcc-checker-a) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--ghcc-checker-a) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--ghcc-checker-a) 75%);
+    background-size: 12px 12px;
+    background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+    vertical-align: top;
+    transition: border-color 0.12s ease;
+  }
+  .box-body .ghcc-inline-img-wrap:hover {
+    border-color: var(--vscode-focusBorder, #007fd4);
+  }
+  .box-body .ghcc-inline-img-wrap img {
+    display: block;
+    max-width: 100%;
+    max-height: 460px;
+    width: auto;
+    height: auto;
+    cursor: zoom-in;
+  }
+  .ghcc-expand-hint {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(20, 20, 22, 0.72);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+  }
+  .ghcc-expand-hint svg { width: 14px; height: 14px; }
+  .ghcc-inline-img-wrap:hover .ghcc-expand-hint,
+  .ghcc-inline-img-wrap:focus-within .ghcc-expand-hint {
+    opacity: 1;
+  }
+
+  .ghcc-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    background: var(--ghcc-lightbox-scrim);
+    backdrop-filter: blur(4px);
+  }
+  .ghcc-lightbox.open {
+    display: flex;
+  }
+  .ghcc-lightbox [hidden] {
+    display: none !important;
+  }
+  .lb-bar {
+    height: 42px;
+    flex: 0 0 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 14px;
+    background: var(--ghcc-surface-elevated);
+    border-bottom: 1px solid var(--gr-border);
+    user-select: none;
+  }
+  .lb-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .lb-counter {
+    font-family: var(--gr-mono);
+    font-size: 11px;
+    color: var(--gr-muted);
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.16));
+    flex-shrink: 0;
+  }
+  .lb-caption {
+    font-size: 12px;
+    color: var(--vscode-foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lb-dim {
+    font-family: var(--gr-mono);
+    font-size: 11px;
+    color: var(--gr-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .lb-tools {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+  .lb-stage {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+    cursor: zoom-in;
+    user-select: none;
+    touch-action: none;
+  }
+  .lb-stage.pannable { cursor: grab; }
+  .lb-stage.panning { cursor: grabbing; }
+  .ghcc-lightbox .ghcc-btn {
+    height: 26px;
+    min-width: 26px;
+    padding: 0 6px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--vscode-foreground);
+    font-size: 12px;
+  }
+  .ghcc-lightbox .ghcc-btn:hover:not(:disabled) {
+    background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+  }
+  .ghcc-lightbox .ghcc-btn:active:not(:disabled),
+  .ghcc-lightbox .ghcc-btn[aria-pressed="true"] {
+    background: var(--vscode-toolbar-activeBackground, rgba(99, 102, 103, 0.38));
+  }
+  .ghcc-lightbox .ghcc-btn[aria-pressed="true"] {
+    border-color: var(--gr-border);
+  }
+  .ghcc-lightbox .ghcc-btn:disabled {
+    opacity: 0.4;
+  }
+  .ghcc-lightbox .ghcc-swatch {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 3px;
+    border: 1px solid var(--gr-border);
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="checker"] {
+    background-image:
+      linear-gradient(45deg, #b8b8be 25%, transparent 25%),
+      linear-gradient(-45deg, #b8b8be 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #b8b8be 75%),
+      linear-gradient(-45deg, transparent 75%, #b8b8be 75%);
+    background-color: #f0f0f2;
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="light"] {
+    background: #f5f5f7;
+  }
+  .ghcc-lightbox .ghcc-swatch[data-bg="dark"] {
+    background: #141416;
+  }
+  .ghcc-lightbox .ghcc-swatch[aria-pressed="true"] {
+    border-color: var(--vscode-focusBorder, #007fd4);
+    box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+  }
+  .ghcc-lightbox .lb-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 36px;
+    height: 52px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid var(--gr-border);
+    background: var(--ghcc-surface-elevated);
+    color: var(--vscode-foreground);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0.78;
+    z-index: 10;
+    transition: opacity 0.12s ease;
+  }
+  .ghcc-lightbox .lb-nav:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+  }
+  .ghcc-lightbox .lb-nav.prev { left: 14px; }
+  .ghcc-lightbox .lb-nav.next { right: 14px; }
+  .ghcc-lightbox .lb-nav svg { width: 18px; height: 18px; }
 `;
 
 function htmlDocument(nonce: string, body: string, script = ""): string {
@@ -864,6 +1093,7 @@ export function renderPrDetailsHtml(
   const olderLink = processedDetails.timelineTruncated ? `<a class="older-link" href="${escapeHtml(processedDetails.url)}">View older conversation on GitHub</a>` : "";
   const mermaidSupport = renderMermaidSupport(processedDetails, nonce, mermaidScriptUri);
 
+  const strings = DEFAULT_IMAGE_VIEWER_STRINGS;
   const body = `
   ${renderHeader(processedDetails, brief)}
   <div class="layout">
@@ -878,17 +1108,42 @@ export function renderPrDetailsHtml(
       ${renderComposer(processedDetails)}
     </main>
     ${renderSidebar(processedDetails)}
+  </div>
+  <div class="ghcc-lightbox" id="ghcc-lightbox" role="dialog" aria-modal="true" aria-label="${escapeHtml(strings.imageLightbox)}">
+    <div class="lb-bar">
+      <div class="lb-left">
+        <span class="lb-counter" id="lb-counter" hidden></span>
+        <span class="lb-caption" id="lb-caption"></span>
+        <span class="lb-dim" id="lb-dim"></span>
+      </div>
+      <div class="lb-tools">
+        ${renderBackdropSwatches("lb-swatches", strings)}
+        <span class="ghcc-sep"></span>
+        ${renderZoomToolbarControls("lb", strings)}
+        <span class="ghcc-sep"></span>
+        <a class="ghcc-btn" id="lb-github" href="${escapeHtml(processedDetails.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(strings.openGitHub)}" data-tooltip="${escapeHtml(strings.openGitHub)}">${IMAGE_VIEWER_ICONS.externalLink}</a>
+        <button class="ghcc-btn" type="button" id="lb-close" aria-label="${escapeHtml(strings.close)}" data-tooltip="${escapeHtml(strings.close)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.close}</button>
+      </div>
+    </div>
+    <div class="lb-stage ghcc-surface" id="lb-stage" data-bg="checker">
+      <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(strings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
+      <img class="canvas-img" id="lb-img" alt="">
+      <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(strings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
+    </div>
   </div>`;
 
   const script = `
   <script nonce="${nonce}">
     const vscodeApi = acquireVsCodeApi();
-    const prKey = ${JSON.stringify(`${processedDetails.repo}#${processedDetails.number}`)};
-    const prUrl = ${JSON.stringify(processedDetails.url)};
+    const prKey = ${safeJsonForScript(`${processedDetails.repo}#${processedDetails.number}`)};
+    const prUrl = ${safeJsonForScript(processedDetails.url)};
+    const EXPAND_ICON_SVG = ${safeJsonForScript(IMAGE_VIEWER_ICONS.expand)};
     const composerText = document.getElementById("composer-text");
-    const allButtons = Array.from(document.querySelectorAll("button"));
+    const allButtons = Array.from(document.querySelectorAll("button")).filter((button) => !button.closest?.(".ghcc-lightbox"));
     const requestedImages = new WeakSet();
     const failingImages = new Map();
+
+    ${IMAGE_VIEWER_CONTROLLER_SCRIPT}
 
     function showImageFallback(image, url, message) {
       const placeholder = document.createElement("span");
@@ -897,7 +1152,7 @@ export function renderPrDetailsHtml(
       link.href = url || prUrl;
       link.textContent = "Open on GitHub";
       placeholder.append((message || "Could not load this image.") + " ", link);
-      const target = image.closest("picture") || image;
+      const target = image.closest(".ghcc-inline-img-wrap") || image.closest("picture") || image;
       const parent = target.parentElement;
       if (parent?.matches("a") && parent.children.length === 1 && !parent.textContent.trim()) {
         parent.replaceWith(placeholder);
@@ -921,10 +1176,274 @@ export function renderPrDetailsHtml(
       vscodeApi.postMessage({ command: "resolveImage", src, requestId });
     }
 
+    function resolveSafeExternalUrl(image) {
+      const anchor = image.closest?.("a");
+      const anchorHref = anchor?.getAttribute?.("href") || "";
+      if (/^https?:\\/\\//i.test(anchorHref)) {
+        return anchorHref;
+      }
+      const imgSrc = image.getAttribute?.("src") || image.currentSrc || "";
+      if (/^https?:\\/\\//i.test(imgSrc)) {
+        return imgSrc;
+      }
+      return prUrl;
+    }
+
+    const lbEl = document.getElementById("ghcc-lightbox");
+    const lbStage = document.getElementById("lb-stage");
+    const lbImg = document.getElementById("lb-img");
+    const lbCounter = document.getElementById("lb-counter");
+    const lbCaption = document.getElementById("lb-caption");
+    const lbDim = document.getElementById("lb-dim");
+    const lbZoomVal = document.getElementById("lb-zoom-val");
+    const lbGithub = document.getElementById("lb-github");
+    const lbPrev = document.getElementById("lb-prev");
+    const lbNext = document.getElementById("lb-next");
+    const lbPixelBtn = document.getElementById("lb-pixel");
+    const lbCloseBtn = document.getElementById("lb-close");
+    const lbZoomInBtn = document.getElementById("lb-zoom-in");
+    const lbZoomOutBtn = document.getElementById("lb-zoom-out");
+    const lbFitBtn = document.getElementById("lb-fit");
+    const lbSwatches = Array.from(document.querySelectorAll("#lb-swatches .ghcc-swatch"));
+
+    const lbState = { items: [], index: 0, bg: "checker", pixelated: false };
+    let lbCtrl = null;
+
+    function collectLightboxImages() {
+      return Array.from(document.querySelectorAll(".timeline .box-body .ghcc-inline-img-wrap img"))
+        .filter((img) => img.isConnected && img.naturalWidth > 0);
+    }
+
+    function closeLightbox() {
+      if (lbEl) {
+        lbEl.classList.remove("open");
+      }
+    }
+
+    function showLightboxIndex(index) {
+      if (!lbEl || !lbStage || !lbImg || !lbCtrl || lbState.items.length === 0) {
+        return;
+      }
+      lbState.index = ((index % lbState.items.length) + lbState.items.length) % lbState.items.length;
+      const item = lbState.items[lbState.index];
+      lbEl.classList.add("open");
+      const multi = lbState.items.length > 1;
+      if (lbCounter) {
+        lbCounter.textContent = (lbState.index + 1) + " / " + lbState.items.length;
+        lbCounter.hidden = !multi;
+      }
+      if (lbPrev) {
+        lbPrev.hidden = !multi;
+      }
+      if (lbNext) {
+        lbNext.hidden = !multi;
+      }
+      if (lbCaption) {
+        lbCaption.textContent = item.alt || "";
+      }
+      if (lbGithub) {
+        lbGithub.href = item.href;
+      }
+
+      const onReady = () => {
+        const nw = lbImg.naturalWidth || item.w || 0;
+        const nh = lbImg.naturalHeight || item.h || 0;
+        if (nw > 0 && nh > 0) {
+          lbImg.width = nw;
+          lbImg.height = nh;
+          if (lbDim) {
+            lbDim.textContent = nw + "×" + nh;
+          }
+          const tiny = Math.max(nw, nh) <= 64;
+          lbState.pixelated = tiny;
+          lbStage.classList.toggle("pixelated", tiny);
+          lbPixelBtn?.setAttribute("aria-pressed", String(tiny));
+        } else if (lbDim) {
+          lbDim.textContent = "";
+        }
+        lbCtrl.fit();
+      };
+      lbImg.onload = onReady;
+      lbImg.alt = item.alt || "";
+      lbImg.src = item.src;
+      if (lbImg.complete && lbImg.naturalWidth > 0) {
+        onReady();
+      }
+    }
+
+    function openLightboxForImage(clickedImg) {
+      if (!lbEl || !lbStage || !lbImg || !lbCtrl) {
+        return;
+      }
+      const images = collectLightboxImages();
+      const idx = images.indexOf(clickedImg);
+      if (idx < 0) {
+        return;
+      }
+      lbState.items = images.map((img) => ({
+        src: img.currentSrc || img.getAttribute("src") || "",
+        alt: img.alt || "",
+        href: resolveSafeExternalUrl(img),
+        w: img.naturalWidth,
+        h: img.naturalHeight,
+      }));
+      showLightboxIndex(idx);
+    }
+
+    if (lbEl && lbStage && lbImg) {
+      lbCtrl = createImageTransformController({
+        getViewportRect: () => lbStage.getBoundingClientRect(),
+        getRefSize: () => {
+          const nw = lbImg.naturalWidth || lbImg.width;
+          const nh = lbImg.naturalHeight || lbImg.height;
+          return nw && nh ? { w: nw, h: nh } : null;
+        },
+        onUpdate: (st) => {
+          lbImg.style.transform = "translate(" + st.tx + "px, " + st.ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
+          lbImg.style.setProperty("--ghcc-scale", String(st.scale));
+          lbStage.classList.toggle("pannable", lbCtrl.isPannable());
+          if (lbZoomVal) {
+            lbZoomVal.textContent = Math.round(st.scale * 100) + "%";
+          }
+        },
+      });
+      lbCtrl.bindViewport(lbStage);
+
+      lbSwatches.forEach((sw) => {
+        sw.addEventListener("click", () => {
+          lbState.bg = sw.dataset.bg;
+          lbSwatches.forEach((b) => b.setAttribute("aria-pressed", String(b === sw)));
+          lbStage.dataset.bg = lbState.bg;
+        });
+      });
+      lbZoomInBtn?.addEventListener("click", () => lbCtrl.stepZoom(1));
+      lbZoomOutBtn?.addEventListener("click", () => lbCtrl.stepZoom(-1));
+      lbFitBtn?.addEventListener("click", () => lbCtrl.fit());
+      lbZoomVal?.addEventListener("click", () => lbCtrl.toggleFitOneToOne());
+      lbPixelBtn?.addEventListener("click", () => {
+        lbState.pixelated = !lbState.pixelated;
+        lbPixelBtn.setAttribute("aria-pressed", String(lbState.pixelated));
+        lbStage.classList.toggle("pixelated", lbState.pixelated);
+      });
+      lbCloseBtn?.addEventListener("click", closeLightbox);
+      lbPrev?.addEventListener("click", () => showLightboxIndex(lbState.index - 1));
+      lbNext?.addEventListener("click", () => showLightboxIndex(lbState.index + 1));
+      let stagePointerDown = null;
+      lbStage.addEventListener("pointerdown", (event) => {
+        stagePointerDown = { x: event.clientX, y: event.clientY };
+      });
+      lbStage.addEventListener("click", (event) => {
+        const down = stagePointerDown;
+        stagePointerDown = null;
+        if (event.target !== lbStage || lbCtrl.consumeJustDragged()) {
+          return;
+        }
+        if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) >= GHCC_DRAG_THRESHOLD) {
+          return;
+        }
+        const rect = lbImg.getBoundingClientRect();
+        const onImage =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom;
+        if (!onImage) {
+          closeLightbox();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (!lbEl.classList.contains("open") || event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeLightbox();
+        } else if (event.key === "ArrowLeft") {
+          if (lbState.items.length > 1) {
+            event.preventDefault();
+            showLightboxIndex(lbState.index - 1);
+          }
+        } else if (event.key === "ArrowRight") {
+          if (lbState.items.length > 1) {
+            event.preventDefault();
+            showLightboxIndex(lbState.index + 1);
+          }
+        } else if (event.key === "+" || event.key === "=") {
+          event.preventDefault();
+          lbCtrl.stepZoom(1);
+        } else if (event.key === "-") {
+          event.preventDefault();
+          lbCtrl.stepZoom(-1);
+        } else if (event.key === "0") {
+          event.preventDefault();
+          lbCtrl.fit();
+        } else if (event.key === "1") {
+          event.preventDefault();
+          lbCtrl.setZoom(1);
+        } else if (event.key === "p" || event.key === "P") {
+          event.preventDefault();
+          lbPixelBtn?.click();
+        }
+      });
+
+      window.addEventListener("resize", () => {
+        if (lbEl.classList.contains("open")) {
+          lbCtrl.refitIfFitted();
+        }
+      });
+    }
+
+    function enhanceInlineImage(image) {
+      if (
+        !(image instanceof HTMLImageElement) ||
+        !image.isConnected ||
+        !image.closest?.(".timeline .box-body") ||
+        image.closest?.(".ghcc-inline-img-wrap")
+      ) {
+        return;
+      }
+      if (!image.complete || image.naturalWidth === 0) {
+        return;
+      }
+      if (image.naturalHeight > 0 && image.naturalHeight <= 36 && image.naturalWidth <= 200) {
+        return;
+      }
+      const wrapTarget = image.closest?.("picture") || image;
+      const parent = wrapTarget.parentNode;
+      if (!parent) {
+        return;
+      }
+      const wrap = document.createElement("span");
+      wrap.className = "ghcc-inline-img-wrap";
+      parent.insertBefore(wrap, wrapTarget);
+      wrap.appendChild(wrapTarget);
+
+      const hint = document.createElement("span");
+      hint.className = "ghcc-expand-hint";
+      hint.setAttribute("aria-hidden", "true");
+      hint.innerHTML = EXPAND_ICON_SVG;
+      wrap.appendChild(hint);
+
+      wrap.addEventListener("click", (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        openLightboxForImage(image);
+      });
+    }
+
     document.addEventListener("error", (event) => resolveFailedImage(event.target), true);
     document.querySelectorAll(".timeline .box-body img").forEach((image) => {
       if (image.complete && image.naturalWidth === 0 && (image.currentSrc || image.getAttribute("src"))) {
         resolveFailedImage(image);
+      } else if (image.complete && image.naturalWidth > 0) {
+        enhanceInlineImage(image);
+      } else {
+        image.addEventListener("load", () => enhanceInlineImage(image), { once: true });
       }
     });
 
@@ -1044,9 +1563,13 @@ export function renderPrDetailsHtml(
           return;
         }
         image.addEventListener("error", () => showImageFallback(image, url), { once: true });
+        image.addEventListener("load", () => enhanceInlineImage(image), { once: true });
         image.closest("picture")?.querySelectorAll("source").forEach((source) => source.remove());
         image.removeAttribute("srcset");
         image.src = dataUri;
+        if (image.complete && image.naturalWidth > 0) {
+          enhanceInlineImage(image);
+        }
         return;
       }
       if (event.data && event.data.command === "reenable") {
