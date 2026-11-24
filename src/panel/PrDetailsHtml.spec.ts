@@ -972,14 +972,14 @@ describe("inline image lightbox", () => {
     expect(smoothHtml).toMatch(/id="lb-pixel"[^>]*aria-pressed="false"/);
   });
 
-  it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", () => {
+  it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", async () => {
     class MockEl {
       className = "";
       textContent = "";
       value = "";
       disabled = false;
       href = "";
-      src = "";
+      private _src: string | null = null;
       alt = "";
       innerHTML = "";
       hidden = false;
@@ -998,6 +998,8 @@ describe("inline image lightbox", () => {
       rect = { left: 100, top: 100, right: 500, bottom: 400, width: 400, height: 300 };
       style = { transform: "", setProperty: vi.fn() };
       onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      decode?: () => Promise<void>;
       focus = vi.fn();
 
       constructor(
@@ -1005,6 +1007,14 @@ describe("inline image lightbox", () => {
         public naturalWidth = 0,
         public naturalHeight = 0,
       ) {}
+
+      get src(): string {
+        return this._src ?? "";
+      }
+
+      set src(value: string) {
+        this._src = value;
+      }
 
       get classList() {
         return {
@@ -1029,10 +1039,23 @@ describe("inline image lightbox", () => {
 
       setAttribute(name: string, value: string) {
         this.attrs.set(name, value);
+        if (name === "src") {
+          this._src = value;
+        }
+      }
+
+      removeAttribute(name: string) {
+        this.attrs.delete(name);
+        if (name === "src") {
+          this._src = null;
+        }
       }
 
       getAttribute(name: string) {
-        return this.attrs.get(name) ?? (name === "href" ? this.href : name === "src" ? this.src : null);
+        if (name === "src") {
+          return this._src;
+        }
+        return this.attrs.get(name) ?? (name === "href" ? this.href : null);
       }
 
       addEventListener(event: string, fn: (e: Record<string, unknown>) => void) {
@@ -1042,6 +1065,11 @@ describe("inline image lightbox", () => {
       }
 
       emit(event: string, payload: Record<string, unknown> = {}) {
+        if (event === "load") {
+          this.onload?.();
+        } else if (event === "error") {
+          this.onerror?.();
+        }
         for (const fn of this.listeners.get(event) ?? []) {
           fn(payload);
         }
@@ -1125,11 +1153,20 @@ describe("inline image lightbox", () => {
     unsafeAnchor.appendChild(dataImg);
     boxBody.appendChild(unsafeAnchor);
 
+    const headerEl = new MockEl("HEADER");
+    headerEl.className = "pr-header";
     const layoutEl = new MockEl("DIV");
     layoutEl.className = "layout";
+    const preInertEl = new MockEl("DIV");
+    preInertEl.inert = true;
     const triggerEl = new MockEl("BUTTON");
     const lbEl = new MockEl("DIV");
     lbEl.className = "ghcc-lightbox";
+    const bodyEl = new MockEl("BODY");
+    bodyEl.appendChild(headerEl);
+    bodyEl.appendChild(layoutEl);
+    bodyEl.appendChild(preInertEl);
+    bodyEl.appendChild(lbEl);
     const lbStage = new MockEl("DIV");
     lbStage.rect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
     const lbImg = new MockImage("", 1200, 800);
@@ -1179,6 +1216,7 @@ describe("inline image lightbox", () => {
     const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
     const mockDocument = {
       activeElement: triggerEl,
+      body: bodyEl,
       getElementById: (id: string) => byId[id] ?? null,
       querySelector: (selector: string) => (selector === ".layout" ? layoutEl : null),
       querySelectorAll: (selector: string) => {
@@ -1204,6 +1242,7 @@ describe("inline image lightbox", () => {
     runInNewContext(script, {
       acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage }),
       crypto: { randomUUID: () => "req-1" },
+      queueMicrotask,
       setTimeout,
       clearTimeout,
       HTMLImageElement: MockImage,
@@ -1272,14 +1311,21 @@ describe("inline image lightbox", () => {
     lbStage.emit("click", { target: lbStage, clientX: 20, clientY: 20 });
     expect(lbEl.classList.contains("open")).toBe(false);
 
-    // Reopening another image still keeps pixelated=false and isolates .layout / moves focus
+    // Reopening another image still keeps pixelated=false and isolates all non-lightbox body children (.pr-header & .layout) / moves focus
+    expect(headerEl.inert).toBe(false);
     expect(layoutEl.inert).toBe(false);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbEl.inert).toBe(false);
+    expect(lbImg.getAttribute("src")).toBeNull();
     expect(triggerEl.focus).toHaveBeenCalledOnce();
     lbClose.focus.mockClear();
     dataWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
     expect(lbStage.classList.contains("pixelated")).toBe(false);
     expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+    expect(headerEl.inert).toBe(true);
     expect(layoutEl.inert).toBe(true);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbEl.inert).toBe(false);
     expect(lbClose.focus).toHaveBeenCalledOnce();
 
     // Host pixelated sync updates lightbox state without echoing back
@@ -1325,7 +1371,7 @@ describe("inline image lightbox", () => {
     expect(lbClose.disabled).toBe(false);
     expect(lbPixel.disabled).toBe(false);
 
-    // Escape closes lightbox and restores .layout + focus
+    // Escape closes lightbox and restores body children inert state + focus
     triggerEl.focus.mockClear();
     const esc = { key: "Escape", target: composer, preventDefault: vi.fn() };
     for (const fn of docListeners.get("keydown") ?? []) {
@@ -1333,8 +1379,82 @@ describe("inline image lightbox", () => {
     }
     expect(esc.preventDefault).toHaveBeenCalledOnce();
     expect(lbEl.classList.contains("open")).toBe(false);
+    expect(headerEl.inert).toBe(false);
     expect(layoutEl.inert).toBe(false);
+    expect(preInertEl.inert).toBe(true);
+    expect(lbImg.getAttribute("src")).toBeNull();
     expect(triggerEl.focus).toHaveBeenCalledOnce();
+
+    // Reopening the same failed image (complete === true && naturalWidth === 0) keeps error state & disabled zoom/pixel controls
+    lbImg.complete = true;
+    lbImg.naturalWidth = 0;
+    lbImg.naturalHeight = 0;
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbZoomOut.disabled).toBe(true);
+    expect(lbFit.disabled).toBe(true);
+    expect(lbZoomVal.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+
+    lbClose.emit("click", {});
+    expect(lbEl.classList.contains("open")).toBe(false);
+    expect(lbImg.getAttribute("src")).toBeNull();
+
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbError.textContent).toBe("Could not load this image.");
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbZoomOut.disabled).toBe(true);
+    expect(lbFit.disabled).toBe(true);
+    expect(lbZoomVal.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+
+    // Switching from image A to image B ignores late error/load/decode callbacks from image A
+    lbClose.emit("click", {});
+    let rejectDecodeA: ((reason: Error) => void) | null = null;
+    lbImg.complete = false;
+    lbImg.naturalWidth = 0;
+    lbImg.naturalHeight = 0;
+    lbImg.decode = () => new Promise<void>((_resolve, reject) => {
+      rejectDecodeA = reject;
+    });
+    linkedWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
+    const staleOnErrorA = lbImg.onerror;
+    const staleOnLoadA = lbImg.onload;
+    // Start A's decode() in-flight before switching to B
+    lbImg.naturalWidth = 1200;
+    lbImg.naturalHeight = 800;
+    staleOnLoadA?.();
+    expect(rejectDecodeA).not.toBeNull();
+
+    // Switch to image B and let B succeed
+    lbImg.decode = () => Promise.resolve();
+    lbImg.complete = true;
+    lbImg.naturalWidth = 400;
+    lbImg.naturalHeight = 300;
+    lbNext.emit("click", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbDim.textContent).toBe("400×300");
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // Late error, load, and decode rejection from image A must not overwrite image B
+    staleOnErrorA?.();
+    staleOnLoadA?.();
+    rejectDecodeA!(new Error("stale decode failure"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbDim.textContent).toBe("400×300");
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
   });
 
   it("replaces out-of-range and surrogate numeric HTML entities with U+FFFD without throwing", () => {

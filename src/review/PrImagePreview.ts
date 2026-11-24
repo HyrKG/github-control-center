@@ -623,7 +623,7 @@ export function renderImagePreviewHtml(
       </div>
     </header>
 
-    <main class="pr-img-stage-wrap" id="a-stage-wrap">
+    <main class="pr-img-stage-wrap" id="a-stage-wrap" tabindex="0">
       <div class="state-empty">
         <div class="state-card">
           <div class="ghcc-spinner"></div>
@@ -899,12 +899,25 @@ export function renderImagePreviewHtml(
         img.className = "canvas-img";
         img.alt = side.path;
         img.draggable = false;
+        const expectedDataUri = side.dataUri || "";
         let settled = false;
+        const isCurrentImg = () => {
+          const current = getSide(side.side);
+          return Boolean(
+            current &&
+            current.status === "ready" &&
+            (current.dataUri || "") === expectedDataUri &&
+            stageWrap.contains(img),
+          );
+        };
         const fail = () => {
           if (settled) {
             return;
           }
           settled = true;
+          if (!isCurrentImg()) {
+            return;
+          }
           onError?.();
         };
         const succeed = () => {
@@ -923,8 +936,11 @@ export function renderImagePreviewHtml(
           state.dims[side.side] = { w: nw, h: nh };
           onLoaded();
         };
-        const handleLoad = () => {
+        const handleLoad = (syncCheck) => {
           if (settled) {
+            return;
+          }
+          if (!syncCheck && !isCurrentImg()) {
             return;
           }
           if (!(img.naturalWidth > 0 && img.naturalHeight > 0)) {
@@ -932,19 +948,28 @@ export function renderImagePreviewHtml(
             return;
           }
           if (typeof img.decode === "function") {
-            Promise.resolve(img.decode()).then(succeed, fail);
+            Promise.resolve(img.decode()).then(() => {
+              if (!isCurrentImg()) {
+                return;
+              }
+              succeed();
+            }, fail);
           } else {
             succeed();
           }
         };
-        img.addEventListener("load", handleLoad);
+        img.addEventListener("load", () => handleLoad(false));
         img.addEventListener("error", fail);
-        img.src = side.dataUri || "";
+        img.src = expectedDataUri;
         if (img.complete) {
           if (img.naturalWidth > 0) {
-            handleLoad();
+            handleLoad(true);
           } else {
-            fail();
+            queueMicrotask(() => {
+              if (!settled && isCurrentImg() && img.complete && !(img.naturalWidth > 0)) {
+                fail();
+              }
+            });
           }
         }
         return img;
@@ -954,16 +979,20 @@ export function renderImagePreviewHtml(
         if (!targetSide || targetSide.status === "error") {
           return;
         }
+        const entry = state.snapshot.sides.find((s) => s.side === targetSide.side);
+        if (!entry || entry.status === "error") {
+          return;
+        }
+        if (targetSide.dataUri && entry.dataUri && entry.dataUri !== targetSide.dataUri) {
+          return;
+        }
         const failedUri = targetSide.dataUri || null;
         if (failedUri) {
           state.failedDataUris[targetSide.side] = failedUri;
         }
-        const entry = state.snapshot.sides.find((s) => s.side === targetSide.side);
-        if (entry) {
-          entry.status = "error";
-          entry.dataUri = undefined;
-          entry.message = STRINGS.loadFailed;
-        }
+        entry.status = "error";
+        entry.dataUri = undefined;
+        entry.message = STRINGS.loadFailed;
         delete state.dims[targetSide.side];
         renderStage({ forceRebuild: true, preserveTransform: !ctrl.state.isFitted });
       }
@@ -997,10 +1026,10 @@ export function renderImagePreviewHtml(
           }
         });
         updateMetaDisplays();
-        if (preserveTransform && ctrl.state.hasFitted && !ctrl.state.isFitted) {
+        if ((preserveTransform && ctrl.state.hasFitted) || !ctrl.state.isFitted) {
           applyTransform(ctrl.state);
         } else {
-          requestAnimationFrame(() => ctrl.fit());
+          requestAnimationFrame(() => ctrl.refitIfFitted());
         }
       }
 
@@ -1110,10 +1139,10 @@ export function renderImagePreviewHtml(
           sv.vp.hidden = false;
           sv.fallbackHost.hidden = true;
           sv.fallbackHost.textContent = "";
-          if (ctrl.state.hasFitted) {
+          if (ctrl.state.hasFitted || !ctrl.state.isFitted) {
             applyTransform(ctrl.state);
           } else if (state.dims[active.side]) {
-            requestAnimationFrame(() => ctrl.fit());
+            requestAnimationFrame(() => ctrl.refitIfFitted());
           }
         } else if (active) {
           sv.vp.hidden = true;
@@ -1154,7 +1183,7 @@ export function renderImagePreviewHtml(
           });
           if (changed) {
             syncSplitCollections();
-            if (ctrl.state.hasFitted && !ctrl.state.isFitted) {
+            if (!ctrl.state.isFitted) {
               applyTransform(ctrl.state);
             }
           }
@@ -1283,10 +1312,10 @@ export function renderImagePreviewHtml(
           state.viewports.push(stage);
           ctrl.bindViewport(stage);
           updateMetaDisplays();
-          if (ctrl.state.hasFitted && !ctrl.state.isFitted) {
+          if (!ctrl.state.isFitted) {
             applyTransform(ctrl.state);
           } else {
-            requestAnimationFrame(() => ctrl.fit());
+            requestAnimationFrame(() => ctrl.refitIfFitted());
           }
           return;
         }
@@ -1326,10 +1355,10 @@ export function renderImagePreviewHtml(
             sideKeys: Object.create(null),
           };
           syncSingleToggleView(preserveTransform);
-          if (ctrl.state.hasFitted && !ctrl.state.isFitted) {
+          if (!ctrl.state.isFitted) {
             applyTransform(ctrl.state);
-          } else if (ctrl.state.isFitted) {
-            requestAnimationFrame(() => ctrl.fit());
+          } else {
+            requestAnimationFrame(() => ctrl.refitIfFitted());
           }
           return;
         }
@@ -1363,10 +1392,10 @@ export function renderImagePreviewHtml(
         stageWrap.appendChild(grid);
         syncSplitCollections();
         updateMetaDisplays();
-        if (ctrl.state.hasFitted && !ctrl.state.isFitted) {
+        if (!ctrl.state.isFitted) {
           applyTransform(ctrl.state);
         } else {
-          requestAnimationFrame(() => ctrl.fit());
+          requestAnimationFrame(() => ctrl.refitIfFitted());
         }
       }
 
@@ -1429,12 +1458,12 @@ export function renderImagePreviewHtml(
           return;
         }
         if (e.key === "Tab" && hasTwoSides() && state.mode === "single") {
-          const target = e.target;
-          const inToolbarOrControl = Boolean(
-            target?.closest?.(".pr-img-toolbar, button, a, input, select, textarea") ||
-            /^(BUTTON|A|INPUT|SELECT|TEXTAREA)$/.test(target?.tagName || ""),
-          );
-          if (inToolbarOrControl) {
+          if (e.shiftKey) {
+            return;
+          }
+          const active = document.activeElement || e.target;
+          const inStage = Boolean(active && (active === stageWrap || stageWrap.contains(active)));
+          if (!inStage || active.closest?.("button, a, input, select, textarea")) {
             return;
           }
           e.preventDefault();

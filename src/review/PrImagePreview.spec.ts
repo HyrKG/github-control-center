@@ -315,6 +315,7 @@ describe("PrImagePreview", () => {
     expect(html).not.toContain("maybeAutoPixelate");
     expect(html).toContain('"pixelated":true');
     expect(html).toMatch(/id="a-pixel"[^>]*aria-pressed="true"/);
+    expect(html).toMatch(/<main[^>]*id="a-stage-wrap"[^>]*tabindex="0"/);
   });
 
   it("defaults to nearest-neighbor, delegates persistence/broadcast to preference, refreshes on open/ready, and syncs standalone panels", async () => {
@@ -419,6 +420,9 @@ describe("PrImagePreview", () => {
 
       set textContent(value: string) {
         this._textContent = value;
+        for (const child of this.children) {
+          child.parentNode = null;
+        }
         this.children = [];
       }
 
@@ -427,6 +431,9 @@ describe("PrImagePreview", () => {
       }
 
       set innerHTML(_value: string) {
+        for (const child of this.children) {
+          child.parentNode = null;
+        }
         this.children = [];
       }
 
@@ -447,7 +454,26 @@ describe("PrImagePreview", () => {
         return node;
       }
 
-      remove(): void {}
+      remove(): void {
+        if (this.parentNode) {
+          const idx = this.parentNode.children.indexOf(this);
+          if (idx >= 0) {
+            this.parentNode.children.splice(idx, 1);
+          }
+          this.parentNode = null;
+        }
+      }
+
+      contains(target: MockDomEl | null): boolean {
+        let cur: MockDomEl | null = target;
+        while (cur) {
+          if (cur === this) {
+            return true;
+          }
+          cur = cur.parentNode;
+        }
+        return false;
+      }
 
       setAttribute(name: string, value: string): void {
         this.attrs.set(name, String(value));
@@ -557,35 +583,46 @@ describe("PrImagePreview", () => {
       const docListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
       const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
       const postMessage = vi.fn();
+      const mockDocument: {
+        activeElement: MockDomEl | null;
+        getElementById: (id: string) => MockDomEl | null;
+        querySelectorAll: (selector: string) => MockDomEl[];
+        addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => void;
+        createElement: (tag: string) => MockDomEl;
+      } = {
+        activeElement: null,
+        getElementById: (id: string) => byId.get(id) ?? null,
+        querySelectorAll: (selector: string) => {
+          if (selector === "#a-diff-modes [data-mode]") {
+            return modeButtons;
+          }
+          if (selector === "#a-side-toggle [data-side]") {
+            return sideButtons;
+          }
+          if (selector === "#a-swatches .ghcc-swatch") {
+            return swatchButtons;
+          }
+          return [];
+        },
+        addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
+          const list = docListeners.get(type) ?? [];
+          list.push(callback);
+          docListeners.set(type, list);
+        },
+        createElement: (tag: string) => {
+          const el = new MockDomEl(tag);
+          onCreateElement?.(el);
+          return el;
+        },
+      };
 
       runInNewContext(inlineScript, {
         acquireVsCodeApi: () => ({ postMessage }),
         requestAnimationFrame: (callback: () => void) => callback(),
-        document: {
-          getElementById: (id: string) => byId.get(id) ?? null,
-          querySelectorAll: (selector: string) => {
-            if (selector === "#a-diff-modes [data-mode]") {
-              return modeButtons;
-            }
-            if (selector === "#a-side-toggle [data-side]") {
-              return sideButtons;
-            }
-            if (selector === "#a-swatches .ghcc-swatch") {
-              return swatchButtons;
-            }
-            return [];
-          },
-          addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
-            const list = docListeners.get(type) ?? [];
-            list.push(callback);
-            docListeners.set(type, list);
-          },
-          createElement: (tag: string) => {
-            const el = new MockDomEl(tag);
-            onCreateElement?.(el);
-            return el;
-          },
-        },
+        queueMicrotask,
+        setTimeout,
+        clearTimeout,
+        document: mockDocument,
         window: {
           addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
             const list = windowListeners.get(type) ?? [];
@@ -606,7 +643,19 @@ describe("PrImagePreview", () => {
         }
       };
 
-      return { stageWrap, statsEl, zoomValBtn, zoomInBtn, pixelBtn, modeButtons, sideButtons, postMessage, emitWindow, emitDoc };
+      return {
+        stageWrap,
+        statsEl,
+        zoomValBtn,
+        zoomInBtn,
+        pixelBtn,
+        modeButtons,
+        sideButtons,
+        postMessage,
+        mockDocument,
+        emitWindow,
+        emitDoc,
+      };
     }
 
     // 1. Happy path: ready -> state -> load -> Toggle Tab guard -> host pixelated sync
@@ -665,18 +714,39 @@ describe("PrImagePreview", () => {
     expect(vm.stageWrap.findAll((el) => el.textContent.includes("32×16"))).toHaveLength(2);
     expect(vm.zoomValBtn.textContent).not.toBe("—");
 
-    // Toggle mode Tab: toolbar control keeps native Tab; stage intercepts and flips head <-> base
+    // Toggle mode Tab: toolbar focus & Shift+Tab pass through; forward Tab on stage or stage canvas flips head <-> base
     vm.modeButtons[2].click();
     expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
-    const toolbarTab = { key: "Tab", target: vm.pixelBtn, preventDefault: vi.fn() };
+    vm.mockDocument.activeElement = vm.pixelBtn;
+    const toolbarTab = { key: "Tab", shiftKey: false, target: vm.pixelBtn, preventDefault: vi.fn() };
     vm.emitDoc("keydown", toolbarTab);
     expect(toolbarTab.preventDefault).not.toHaveBeenCalled();
     expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
 
-    const stageTab = { key: "Tab", target: vm.stageWrap, preventDefault: vi.fn() };
+    vm.mockDocument.activeElement = vm.stageWrap;
+    const shiftTab = { key: "Tab", shiftKey: true, target: vm.stageWrap, preventDefault: vi.fn() };
+    vm.emitDoc("keydown", shiftTab);
+    expect(shiftTab.preventDefault).not.toHaveBeenCalled();
+    expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
+
+    const stageTab = { key: "Tab", shiftKey: false, target: vm.stageWrap, preventDefault: vi.fn() };
     vm.emitDoc("keydown", stageTab);
     expect(stageTab.preventDefault).toHaveBeenCalledOnce();
     expect(vm.sideButtons[0].getAttribute("aria-pressed")).toBe("true");
+
+    const stageCanvas = vm.stageWrap.findAll((el) => el.className.includes("canvas-vp"))[0];
+    vm.mockDocument.activeElement = stageCanvas;
+    const canvasTab = { key: "Tab", shiftKey: false, target: stageCanvas, preventDefault: vi.fn() };
+    vm.emitDoc("keydown", canvasTab);
+    expect(canvasTab.preventDefault).toHaveBeenCalledOnce();
+    expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
+
+    const stageExtLink = vm.stageWrap.findAll((el) => el.className === "pane-ext-link")[0];
+    vm.mockDocument.activeElement = stageExtLink;
+    const stageLinkTab = { key: "Tab", shiftKey: false, target: stageExtLink, preventDefault: vi.fn() };
+    vm.emitDoc("keydown", stageLinkTab);
+    expect(stageLinkTab.preventDefault).not.toHaveBeenCalled();
+    expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
 
     // Local toggle posts setPixelated; incoming host sync updates UI without echoing
     vm.postMessage.mockClear();
@@ -723,7 +793,92 @@ describe("PrImagePreview", () => {
     expect(decodeVm.stageWrap.findAll((el) => el.tagName === "img")[0].src).toBe("data:image/png;base64,GOOD=");
     expect(decodeVm.stageWrap.findAll((el) => el.className === "state-title").some((el) => el.textContent === "Could not load this image.")).toBe(true);
 
-    // 3. Empty stage aligns external link href with primary side (toolarge Base over error Head)
+    // Replacing Base with a new dataUri clears the stale failed state and renders normally
+    const recoveredVm = bootVm(initialSnapshot, (el) => {
+      if (el.tagName === "img") {
+        el.decode = () => (el.src.includes("BAD=") ? Promise.reject(new Error("corrupt")) : Promise.resolve());
+      }
+    });
+    recoveredVm.emitWindow("message", { data: { command: "state", snapshot: baseReadyHeadLoading } });
+    const failingBaseImg = recoveredVm.stageWrap.findAll((el) => el.tagName === "img")[0];
+    failingBaseImg.naturalWidth = 10;
+    failingBaseImg.naturalHeight = 10;
+    failingBaseImg.emit("load", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(recoveredVm.stageWrap.findAll((el) => el.tagName === "img")).toHaveLength(0);
+
+    const recoveredSnapshot: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,RECOVERED=", size: 48 },
+        { ...initialSnapshot.sides[1], status: "ready", dataUri: "data:image/png;base64,HEAD_OK=", size: 64 },
+      ],
+    };
+    recoveredVm.emitWindow("message", { data: { command: "state", snapshot: recoveredSnapshot } });
+    const recoveredImgs = recoveredVm.stageWrap.findAll((el) => el.tagName === "img");
+    expect(recoveredImgs).toHaveLength(2);
+    expect(recoveredImgs[0].src).toBe("data:image/png;base64,RECOVERED=");
+    recoveredImgs[0].naturalWidth = 40;
+    recoveredImgs[0].naturalHeight = 20;
+    recoveredImgs[0].emit("load", {});
+    recoveredImgs[1].naturalWidth = 40;
+    recoveredImgs[1].naturalHeight = 20;
+    recoveredImgs[1].emit("load", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(recoveredVm.stageWrap.findAll((el) => el.className === "state-empty")).toHaveLength(0);
+
+    // 3. Complete-broken images (complete === true && naturalWidth === 0) defer failure without re-entrant DOM stacking
+    const syncBrokenVm = bootVm(initialSnapshot, (el) => {
+      if (el.tagName === "img") {
+        el.complete = true;
+        el.naturalWidth = 0;
+        el.naturalHeight = 0;
+      }
+    });
+    syncBrokenVm.emitWindow("message", { data: { command: "state", snapshot: loadedSnapshot } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(syncBrokenVm.stageWrap.children).toHaveLength(1);
+    expect(syncBrokenVm.stageWrap.findAll((el) => el.className === "state-empty")).toHaveLength(1);
+    expect(syncBrokenVm.stageWrap.findAll((el) => el.className === "pane")).toHaveLength(0);
+    expect(syncBrokenVm.stageWrap.findAll((el) => el.tagName === "img")).toHaveLength(0);
+    expect(syncBrokenVm.stageWrap.findAll((el) => el.className === "state-title")[0]?.textContent).toBe("Could not load this image.");
+
+    // 4. User zoom & pan while img.decode() is in-flight is preserved after decode() resolves
+    const pendingDecodes: Array<() => void> = [];
+    const inFlightVm = bootVm(initialSnapshot, (el) => {
+      if (el.tagName === "img") {
+        el.decode = () => new Promise<void>((resolve) => {
+          pendingDecodes.push(resolve);
+        });
+      }
+    });
+    inFlightVm.emitWindow("message", { data: { command: "state", snapshot: loadedSnapshot } });
+    const inFlightImgs = inFlightVm.stageWrap.findAll((el) => el.tagName === "img");
+    inFlightImgs[0].naturalWidth = 32;
+    inFlightImgs[0].naturalHeight = 16;
+    inFlightImgs[0].emit("load", {});
+    inFlightImgs[1].naturalWidth = 32;
+    inFlightImgs[1].naturalHeight = 16;
+    inFlightImgs[1].emit("load", {});
+    expect(pendingDecodes).toHaveLength(2);
+
+    // User zooms in and pans before decode() settles
+    inFlightVm.zoomInBtn.click();
+    const firstVp = inFlightVm.stageWrap.findAll((el) => el.className.includes("canvas-vp"))[0];
+    firstVp.emit("pointerdown", { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    firstVp.emit("pointermove", { clientX: 140, clientY: 120 });
+    firstVp.emit("pointerup", {});
+    expect(inFlightVm.zoomValBtn.textContent).toBe("125%");
+    const transformBeforeDecode = inFlightImgs[0].style.transform;
+    expect(transformBeforeDecode).toBe("translate(40px, 20px) translate(-50%, -50%) scale(1.25)");
+
+    pendingDecodes.forEach((resolve) => resolve());
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(inFlightVm.zoomValBtn.textContent).toBe("125%");
+    expect(inFlightImgs[0].style.transform).toBe(transformBeforeDecode);
+    expect(inFlightImgs[1].style.transform).toBe(transformBeforeDecode);
+
+    // 5. Empty stage aligns external link href with primary side (toolarge Base over error Head)
     const emptySnapshot: IImagePreviewSnapshot = {
       revision: "rev-empty",
       changeType: "MODIFIED",

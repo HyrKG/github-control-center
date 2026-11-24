@@ -1203,7 +1203,6 @@ export function renderPrDetailsHtml(
       return prUrl;
     }
 
-    const layoutEl = document.querySelector(".layout");
     const lbEl = document.getElementById("ghcc-lightbox");
     const lbStage = document.getElementById("lb-stage");
     const lbImg = document.getElementById("lb-img");
@@ -1222,8 +1221,10 @@ export function renderPrDetailsHtml(
     const lbFitBtn = document.getElementById("lb-fit");
     const lbSwatches = Array.from(document.querySelectorAll("#lb-swatches .ghcc-swatch"));
 
-    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)}, failed: false };
+    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)}, failed: false, open: false };
     let lbCtrl = null;
+    let lbLoadToken = 0;
+    let inertedElements = [];
     let lastFocusedElement = null;
 
     function collectLightboxImages() {
@@ -1268,10 +1269,18 @@ export function renderPrDetailsHtml(
       if (!lbEl || !lbEl.classList.contains("open")) {
         return;
       }
+      lbLoadToken += 1;
+      lbState.open = false;
       lbEl.classList.remove("open");
-      if (layoutEl) {
-        layoutEl.inert = false;
+      if (lbImg) {
+        lbImg.onload = null;
+        lbImg.onerror = null;
+        lbImg.removeAttribute("src");
       }
+      for (const el of inertedElements) {
+        el.inert = false;
+      }
+      inertedElements = [];
       const target = lastFocusedElement;
       lastFocusedElement = null;
       if (target && target.isConnected !== false && typeof target.focus === "function") {
@@ -1289,10 +1298,16 @@ export function renderPrDetailsHtml(
       }
       lbState.index = ((index % lbState.items.length) + lbState.items.length) % lbState.items.length;
       const item = lbState.items[lbState.index];
+      const token = ++lbLoadToken;
+      lbState.open = true;
       lbEl.classList.add("open");
       if (!wasOpen) {
-        if (layoutEl) {
-          layoutEl.inert = true;
+        inertedElements = [];
+        for (const el of Array.from(document.body?.children || [])) {
+          if (el !== lbEl && !el.inert) {
+            el.inert = true;
+            inertedElements.push(el);
+          }
         }
         lbCloseBtn?.focus?.();
       }
@@ -1317,7 +1332,10 @@ export function renderPrDetailsHtml(
       lbStage.classList.toggle("pixelated", lbState.pixelated);
       lbPixelBtn?.setAttribute("aria-pressed", String(lbState.pixelated));
 
-      const onReady = () => {
+      const applyLoaded = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
         const nw = lbImg.naturalWidth || item.w || 0;
         const nh = lbImg.naturalHeight || item.h || 0;
         if (nw > 0 && nh > 0) {
@@ -1331,11 +1349,45 @@ export function renderPrDetailsHtml(
           setLightboxFailed(true);
         }
       };
-      lbImg.onload = onReady;
+      const onError = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
+        setLightboxFailed(true);
+      };
+      const onLoad = () => {
+        if (token !== lbLoadToken || !lbState.open) {
+          return;
+        }
+        if (typeof lbImg.decode === "function") {
+          Promise.resolve(lbImg.decode()).then(applyLoaded, onError);
+        } else {
+          applyLoaded();
+        }
+      };
+      lbImg.onload = onLoad;
+      lbImg.onerror = onError;
       lbImg.alt = item.alt || "";
-      lbImg.src = item.src;
-      if (lbImg.complete && lbImg.naturalWidth > 0) {
-        onReady();
+      const targetSrc = item.src || "";
+      if (!targetSrc) {
+        lbImg.removeAttribute("src");
+        setLightboxFailed(true);
+        return;
+      }
+      if (lbImg.getAttribute("src") === targetSrc) {
+        lbImg.removeAttribute("src");
+      }
+      lbImg.src = targetSrc;
+      if (lbImg.complete) {
+        if (lbImg.naturalWidth > 0) {
+          onLoad();
+        } else {
+          queueMicrotask(() => {
+            if (token === lbLoadToken && lbState.open && lbImg.complete && !(lbImg.naturalWidth > 0)) {
+              setLightboxFailed(true);
+            }
+          });
+        }
       }
     }
 
@@ -1385,7 +1437,6 @@ export function renderPrDetailsHtml(
           lbStage.dataset.bg = lbState.bg;
         });
       });
-      lbImg.addEventListener("error", () => setLightboxFailed(true));
       lbZoomInBtn?.addEventListener("click", () => lbCtrl.stepZoom(1));
       lbZoomOutBtn?.addEventListener("click", () => lbCtrl.stepZoom(-1));
       lbFitBtn?.addEventListener("click", () => lbCtrl.fit());
