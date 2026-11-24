@@ -67,6 +67,11 @@ export class Uri {
     public readonly query: string,
   ) {}
 
+  static parse(value: string): Uri {
+    const url = new URL(value);
+    return Uri.from({ scheme: url.protocol.slice(0, -1), path: url.pathname, query: url.search.slice(1) });
+  }
+
   static from(parts: IUriParts): Uri {
     return new Uri(parts.scheme, parts.path, parts.query ?? "");
   }
@@ -80,3 +85,43 @@ export const authentication = {
   getSession: async (): Promise<undefined> => undefined,
   onDidChangeSessions: (): { dispose(): void } => ({ dispose: (): void => undefined }),
 };
+export const env = { language: "en" };
+
+let messages: Readonly<Record<string, string>> | undefined;
+
+function setTestLocale(language = "en", bundle: Readonly<Record<string, string>> = {}): void {
+  env.language = language;
+  messages = Object.keys(bundle).length > 0 ? bundle : undefined;
+}
+
+export const l10n = {
+  setTestLocale,
+  get bundle() { return messages; },
+  t(message: string | { message: string; comment: string[] }, ...args: Array<string | number | boolean>): string {
+    const fallback = typeof message === "string" ? message : message.message;
+    const key = typeof message === "string" ? message : `${message.message}/${message.comment.join("")}`;
+    return (messages?.[key] ?? fallback).replace(/\{(\d+)\}/g, (match, index: string) => {
+      const value = args[Number(index)];
+      return value === undefined ? match : String(value);
+    });
+  },
+};
+
+
+export enum CommentMode {
+  Preview,
+}
+
+export enum CommentThreadState {
+  Unresolved,
+  Resolved,
+}
+
+export enum CommentThreadCollapsibleState {
+  Collapsed,
+  Expanded,
+}
+
+export class MarkdownString {
+  constructor(public readonly value: string) {}
+}

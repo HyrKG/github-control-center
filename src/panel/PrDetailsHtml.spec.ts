@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
+import { afterEach, describe, expect, it } from "vitest";
+import { createPrDetailsStrings } from "./PrDetailsStrings";
 import { renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails } from "../core/types";
 
@@ -53,7 +55,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
 }
 
 function render(overrides: Partial<IPrDetails> = {}): string {
-  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW);
+  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, createPrDetailsStrings());
 }
 
 const MERMAID_URI = "vscode-resource://ext/dist/mermaid.min.js";
@@ -66,10 +68,43 @@ const MERMAID_SECTION =
   "<span>Loading</span></section>";
 
 function renderWithMermaid(overrides: Partial<IPrDetails> = {}): string {
-  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, MERMAID_URI);
+  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, createPrDetailsStrings(), MERMAID_URI);
 }
 
 describe("renderPrDetailsHtml", () => {
+  afterEach(() => setTestLocale());
+
+  it("falls back to English when a display language has no bundle", () => {
+    setTestLocale("fr");
+    const html = render({ bodyHtml: "" });
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("No description provided.");
+    expect(html).toContain('aria-label="Copy branch name"');
+  });
+
+  it("localizes the document and escapes data in reordered sentences", () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const html = render({
+      title: "<script>PR title</script>",
+      author: "<owner>",
+      baseRefName: "<main>",
+      headRefName: '<branch>"',
+      isBehindBase: true,
+      pendingReviewCommentCount: 2,
+      reviewers: [{ name: "mario", state: "APPROVED", isStale: true }],
+    });
+    expect(html).toContain('<html lang="zh-cn">');
+    expect(html).toContain("&lt;script&gt;PR title&lt;/script&gt;");
+    expect(html).toContain("<strong>&lt;owner&gt;</strong> 想将");
+    expect(html).toContain('&lt;branch&gt;&quot;</span><button id="copy-branch"');
+    expect(html).toContain('aria-label="复制分支名称"');
+    expect(html).toContain('aria-label="更新方式"');
+    expect(html).toContain('value="REBASE">通过变基更新');
+    expect(html).toContain('class="reviewer-state APPROVED stale">✓ 已批准（已过期）');
+    expect(html).toContain("2 条评论草稿");
+    expect(html).toContain("6 天前发表了评论");
+  });
+
   it("should escape HTML in interpolated fields so injected markup stays inert", () => {
     const html = render({ title: '<script>alert("boom")</script>' });
 
@@ -356,7 +391,7 @@ describe("renderPrDetailsHtml", () => {
     });
 
     it("should put the configured default update method first", () => {
-      const html = renderPrDetailsHtml(buildDetails({ isBehindBase: true }), NONCE, NOW, undefined, "MERGE");
+      const html = renderPrDetailsHtml(buildDetails({ isBehindBase: true }), NONCE, NOW, createPrDetailsStrings(), undefined, "MERGE");
 
       const rebaseIndex = html.indexOf('<option value="REBASE">');
       const mergeIndex = html.indexOf('<option value="MERGE">');
@@ -621,7 +656,7 @@ describe("renderPrDetailsHtml", () => {
 
   describe("brief section", () => {
     function renderWithBrief(brief: IBriefState): string {
-      return renderPrDetailsHtml(buildDetails(), NONCE, NOW, undefined, "REBASE", brief);
+      return renderPrDetailsHtml(buildDetails(), NONCE, NOW, createPrDetailsStrings(), undefined, "REBASE", brief);
     }
 
     it("should render neither button nor section when no brief state is passed", () => {

@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as vscode from "vscode";
+import { LocalizedError } from "../core/errors";
 
 export const SYSTEM_PROMPT_FILENAME = "github-control-center-brief-system-prompt.txt";
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -66,12 +68,19 @@ function killChildTree(child: ChildProcess): void {
   child.kill();
 }
 
-function toFailureMessage(exitCode: number | null, stderr: string): string {
+function toFailureError(exitCode: number | null, stderr: string): Error {
   if (/unknown option/i.test(stderr)) {
-    return "The configured Claude Code CLI does not support the required flags — please update Claude Code.";
+    return new LocalizedError(
+      "The configured Claude Code CLI does not support the required flags — please update Claude Code.",
+      vscode.l10n.t("The configured Claude Code CLI does not support the required flags — please update Claude Code."),
+    );
   }
-  const tail = stderr.trim().slice(-STDERR_TAIL_CHARS) || `exit code ${exitCode}`;
-  return `Claude CLI failed: ${tail}`;
+  const tail = stderr.trim().slice(-STDERR_TAIL_CHARS);
+  const detail = tail || vscode.l10n.t("exit code {0}", String(exitCode));
+  return new LocalizedError(
+    `Claude CLI failed: ${tail || `exit code ${exitCode}`}`,
+    vscode.l10n.t("Claude CLI failed: {0}", detail),
+  );
 }
 
 export function runAiPrompt(
@@ -131,7 +140,11 @@ export function runAiPrompt(
 
     const timer = setTimeout(() => {
       killChildTree(child);
-      settle(new Error(`Claude CLI timed out after ${Math.round(timeoutMs / 1000)}s`));
+      const seconds = Math.round(timeoutMs / 1000);
+      settle(new LocalizedError(
+        `Claude CLI timed out after ${seconds}s`,
+        vscode.l10n.t("Claude CLI timed out after {0}s", seconds),
+      ));
     }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer | string) => {
@@ -145,7 +158,7 @@ export function runAiPrompt(
       if (exitCode === 0) {
         settle(undefined, stdout.trim());
       } else {
-        settle(new Error(toFailureMessage(exitCode, stderr)));
+        settle(toFailureError(exitCode, stderr));
       }
     });
 
