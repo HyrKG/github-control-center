@@ -1,6 +1,5 @@
 import { escapeHtml } from "../core/html";
 import {
-  DEFAULT_IMAGE_VIEWER_STRINGS,
   IMAGE_VIEWER_CONTROLLER_SCRIPT,
   IMAGE_VIEWER_ICONS,
   IMAGE_VIEWER_SHARED_CSS,
@@ -10,26 +9,8 @@ import {
 } from "../core/imageViewer";
 import { gitHubFileRoot } from "../github/fileUrls";
 import { MAX_IMAGE_BYTES } from "../core/types";
-import type { IBriefState, IPrDetails, IPrTimelineItem, MergeMethod, UpdateBranchMethod } from "../core/types";
-
-export const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
-  SQUASH: "Squash and merge",
-  MERGE: "Create a merge commit",
-  REBASE: "Rebase and merge",
-};
-
-export const UPDATE_METHOD_LABELS: Record<UpdateBranchMethod, string> = {
-  REBASE: "Update with rebase",
-  MERGE: "Update with merge commit",
-};
-
-const REVIEW_STATE_LABELS: Record<string, string> = {
-  APPROVED: "approved these changes",
-  CHANGES_REQUESTED: "requested changes",
-  COMMENTED: "reviewed",
-  DISMISSED: "review was dismissed",
-  PENDING: "started a review",
-};
+import type { IBriefState, IPrDetails, IPrTimelineItem, UpdateBranchMethod } from "../core/types";
+import type { IPrDetailsStrings } from "./PrDetailsStrings";
 
 // text glyphs (not emoji, except the comment bubble) so theme colors apply via CSS
 const REVIEW_STATE_ICONS: Record<string, string> = {
@@ -39,18 +20,6 @@ const REVIEW_STATE_ICONS: Record<string, string> = {
   DISMISSED: "●",
   PENDING: "●",
   REQUESTED: "●",
-};
-
-const REVIEW_DECISION_LABELS: Record<string, string> = {
-  APPROVED: "✓ Changes approved",
-  CHANGES_REQUESTED: "✗ Changes requested",
-  REVIEW_REQUIRED: "● Review required",
-};
-
-const MERGEABLE_LABELS: Record<IPrDetails["mergeable"], string> = {
-  MERGEABLE: "✓ No conflicts with the base branch",
-  CONFLICTING: "✗ This branch has conflicts with the base branch",
-  UNKNOWN: "● Checking mergeability…",
 };
 
 const BASE_STYLE = `
@@ -524,9 +493,14 @@ const BASE_STYLE = `
   .ghcc-lightbox .lb-nav svg { width: 18px; height: 18px; }
 `;
 
-function htmlDocument(nonce: string, body: string, script = ""): string {
+// Escape the translated sentence before inserting markup with already-escaped values.
+function renderSentence(template: string, ...parts: string[]): string {
+  return escapeHtml(template).replace(/\{(\d+)\}/g, (placeholder, index: string) => parts[Number(index)] ?? placeholder);
+}
+
+function htmlDocument(nonce: string, body: string, lang: string, script = ""): string {
   return `<!DOCTYPE html>
-<html>
+<html lang="${escapeHtml(lang)}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'">
@@ -539,19 +513,19 @@ ${script}
 </html>`;
 }
 
-export function renderMessageHtml(message: string, nonce: string): string {
-  return htmlDocument(nonce, `<p>${escapeHtml(message)}</p>`);
+export function renderMessageHtml(message: string, nonce: string, lang: string): string {
+  return htmlDocument(nonce, `<p>${escapeHtml(message)}</p>`, lang);
 }
 
-export function formatRelativeDate(isoDate: string, now: number): string {
+function formatRelativeDate(isoDate: string, now: number, strings: IPrDetailsStrings): string {
   const ageInDays = Math.floor((now - new Date(isoDate).getTime()) / 86_400_000);
   if (ageInDays <= 0) {
-    return "today";
+    return strings.today;
   }
   if (ageInDays === 1) {
-    return "yesterday";
+    return strings.yesterday;
   }
-  return `${ageInDays} days ago`;
+  return strings.daysAgo(ageInDays);
 }
 
 function renderAvatar(avatarUrl: string, author: string): string {
@@ -561,7 +535,7 @@ function renderAvatar(avatarUrl: string, author: string): string {
   return `<img class="avatar" src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(author)}">`;
 }
 
-function renderBriefButton(brief?: IBriefState): string {
+function renderBriefButton(strings: IPrDetailsStrings, brief?: IBriefState): string {
   if (!brief || brief.status === "unavailable") {
     return "";
   }
@@ -571,16 +545,16 @@ function renderBriefButton(brief?: IBriefState): string {
   const disabled = brief.status === "pending" || isFreshDone ? " disabled" : "";
   let title = "";
   if (isFreshDone) {
-    title = ' title="Already summarized — new commits re-enable it"';
+    title = ` title="${escapeHtml(strings.briefDone)}"`;
   } else if (brief.status === "done") {
-    title = ' title="New commits since this summary — click to regenerate"';
+    title = ` title="${escapeHtml(strings.briefStale)}"`;
   }
-  return `<button id="brief"${disabled}${title}>✨ Brief me</button>`;
+  return `<button id="brief"${disabled}${title}>${escapeHtml(strings.briefMe)}</button>`;
 }
 
 // dedicated row under the state pill — future action buttons land here too
-function renderHeaderActions(brief?: IBriefState): string {
-  const briefButton = renderBriefButton(brief);
+function renderHeaderActions(strings: IPrDetailsStrings, brief?: IBriefState): string {
+  const briefButton = renderBriefButton(strings, brief);
   if (!briefButton) {
     return "";
   }
@@ -648,13 +622,13 @@ function renderBriefText(text: string): string {
   return parts.join("");
 }
 
-function renderBriefSection(brief?: IBriefState): string {
+function renderBriefSection(strings: IPrDetailsStrings, brief?: IBriefState): string {
   if (!brief || brief.status === "idle" || brief.status === "unavailable") {
     return "";
   }
   let content: string;
   if (brief.status === "pending") {
-    content = "Summarizing…";
+    content = escapeHtml(strings.summarizing);
   } else if (brief.status === "error") {
     content = `<span class="brief-error">${escapeHtml(brief.text ?? "")}</span>`;
   } else {
@@ -668,13 +642,13 @@ function renderBriefSection(brief?: IBriefState): string {
     '<svg viewBox="0 0 24 24" width="16" height="16"><g stroke="#D97757" stroke-width="3" stroke-linecap="round">' +
     '<line x1="12" y1="3" x2="12" y2="21"/><line x1="4.2" y1="7.5" x2="19.8" y2="16.5"/><line x1="19.8" y1="7.5" x2="4.2" y2="16.5"/>' +
     "</g></svg></span>";
-  const staleTag = brief.stale ? '<span class="brief-stale-tag">outdated</span>' : "";
+  const staleTag = brief.stale ? `<span class="brief-stale-tag">${escapeHtml(strings.briefOutdated)}</span>` : "";
   const staleBanner = brief.stale
-    ? '<div class="brief-stale">⚠ New commits were pushed since this summary — it may be outdated. Click ✨ Brief me to regenerate.</div>'
+    ? `<div class="brief-stale">${escapeHtml(strings.briefStaleBanner)}</div>`
     : "";
   return `
   <details open class="box brief-section">
-    <summary>${providerAvatar}Summary${staleTag}</summary>
+    <summary>${providerAvatar}${escapeHtml(strings.summary)}${staleTag}</summary>
     <div class="box-body brief-body">${staleBanner}${content}</div>
   </details>`;
 }
@@ -687,51 +661,62 @@ const CHECK_ICON_SVG =
 const BRANCH_ICON_SVG =
   '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>';
 
-function renderHeader(details: IPrDetails, brief?: IBriefState): string {
-  const pill = details.state === "OPEN" && details.isDraft ? { css: "draft", label: "Draft" } : PILLS[details.state];
+function renderHeader(details: IPrDetails, strings: IPrDetailsStrings, brief?: IBriefState): string {
+  const isDraft = details.state === "OPEN" && details.isDraft;
+  const pillClass = isDraft ? "draft" : PILL_CLASSES[details.state];
+  const pillLabel = isDraft ? strings.draft : strings.prStates[details.state];
+  const mergeSentence = details.commitsCount === 1 ? strings.mergeOne : strings.mergeMany;
+  const checkout = details.state === "OPEN"
+    ? `<button id="checkout-branch" class="branch-action" data-tooltip="${escapeHtml(strings.checkoutBranch)}" aria-label="${escapeHtml(strings.checkoutBranch)}">${BRANCH_ICON_SVG}</button>`
+    : "";
+  const head = `<span class="branch" id="head-branch">${escapeHtml(details.headRefName)}</span><button id="copy-branch" class="branch-action" data-tooltip="${escapeHtml(strings.copyBranch)}" aria-label="${escapeHtml(strings.copyBranch)}"><span class="copy-icon">${COPY_ICON_SVG}</span><span class="copied-icon">${CHECK_ICON_SVG}</span></button>${checkout}`;
   const repoUrl = details.url.replace(/\/pull\/\d+$/, "");
   return `
   <header class="pr-header">
     <div class="repo-line">
       <a href="${escapeHtml(repoUrl)}">${escapeHtml(details.repo)}</a>
-      · <a href="${escapeHtml(details.url)}">Open on GitHub</a>
+      · <a href="${escapeHtml(details.url)}">${escapeHtml(strings.openOnGitHub)}</a>
     </div>
     <h1>${escapeHtml(details.title)} <span class="pr-number">#${details.number}</span></h1>
     <div>
-      <span class="state-pill ${pill.css}">${pill.label}</span>
-      <span class="merge-sentence">
-        <strong>${escapeHtml(details.author)}</strong> wants to merge ${details.commitsCount} ${details.commitsCount === 1 ? "commit" : "commits"}
-        into <span class="branch">${escapeHtml(details.baseRefName)}</span>
-        from <span class="branch" id="head-branch">${escapeHtml(details.headRefName)}</span><button id="copy-branch" class="branch-action" data-tooltip="Copy branch name" aria-label="Copy branch name"><span class="copy-icon">${COPY_ICON_SVG}</span><span class="copied-icon">${CHECK_ICON_SVG}</span></button>${details.state === "OPEN" ? `<button id="checkout-branch" class="branch-action" data-tooltip="Checkout branch" aria-label="Checkout branch">${BRANCH_ICON_SVG}</button>` : ""}
-      </span>
-    </div>${renderHeaderActions(brief)}
+      <span class="state-pill ${pillClass}">${escapeHtml(pillLabel)}</span>
+      <span class="merge-sentence">${renderSentence(
+        mergeSentence("{0}", details.commitsCount, "{1}", "{2}"),
+        `<strong>${escapeHtml(details.author)}</strong>`,
+        `<span class="branch">${escapeHtml(details.baseRefName)}</span>`,
+        head,
+      )}</span>
+    </div>${renderHeaderActions(strings, brief)}
   </header>`;
 }
 
-const PILLS: Record<IPrDetails["state"], { css: string; label: string }> = {
-  OPEN: { css: "open", label: "Open" },
-  MERGED: { css: "merged", label: "Merged" },
-  CLOSED: { css: "closed", label: "Closed" },
+const PILL_CLASSES: Record<IPrDetails["state"], string> = {
+  OPEN: "open",
+  MERGED: "merged",
+  CLOSED: "closed",
 };
 
-function renderDescription(details: IPrDetails, now: number): string {
+function renderDescription(details: IPrDetails, now: number, strings: IPrDetailsStrings): string {
   return `
   <div class="box">
     ${renderAvatar(details.authorAvatarUrl, details.author)}
     <div class="box-header">
-      <span><span class="author">${escapeHtml(details.author)}</span> opened ${formatRelativeDate(details.createdAt, now)}</span>
+      <span>${renderSentence(
+        strings.opened("{0}", formatRelativeDate(details.createdAt, now, strings)),
+        `<span class="author">${escapeHtml(details.author)}</span>`,
+      )}</span>
     </div>
-    <div class="box-body">${details.bodyHtml || `<em>No description provided.</em>`}</div>
+    <div class="box-body">${details.bodyHtml || `<em>${escapeHtml(strings.noDescription)}</em>`}</div>
   </div>`;
 }
 
 // consecutive commits collapse into one avatar + list (GitHub-style) so a push burst stays compact
-function renderTimeline(items: IPrTimelineItem[], prUrl: string, now: number): string {
+function renderTimeline(items: IPrTimelineItem[], prUrl: string, now: number, strings: IPrDetailsStrings): string {
   const rendered: string[] = [];
   let commitRun: IPrTimelineItem[] = [];
   const flushCommitRun = () => {
     if (commitRun.length > 0) {
-      rendered.push(renderCommitGroup(commitRun, now));
+      rendered.push(renderCommitGroup(commitRun, now, strings));
       commitRun = [];
     }
   };
@@ -745,16 +730,17 @@ function renderTimeline(items: IPrTimelineItem[], prUrl: string, now: number): s
       continue;
     }
     flushCommitRun();
-    rendered.push(renderTimelineItem(item, prUrl, now));
+    rendered.push(renderTimelineItem(item, prUrl, now, strings));
   }
   flushCommitRun();
   return rendered.join("");
 }
 
-function renderCommitGroup(commits: IPrTimelineItem[], now: number): string {
+function renderCommitGroup(commits: IPrTimelineItem[], now: number, strings: IPrDetailsStrings): string {
   const [first] = commits;
   const lastCommit = commits[commits.length - 1];
-  const countLabel = commits.length === 1 ? "added a commit" : `added ${commits.length} commits`;
+  const age = formatRelativeDate(lastCommit.createdAt, now, strings);
+  const summary = commits.length === 1 ? strings.commitAdded("{0}", age) : strings.commitsAdded("{0}", commits.length, age);
   const lines = commits
     .map(
       (commit) => `
@@ -767,26 +753,29 @@ function renderCommitGroup(commits: IPrTimelineItem[], now: number): string {
   return `
   <div class="commit-group">
     ${renderAvatar(first.avatarUrl, first.author)}
-    <div class="commit-group-header"><span class="author">${escapeHtml(first.author)}</span> ${countLabel} ${formatRelativeDate(lastCommit.createdAt, now)}</div>
+    <div class="commit-group-header">${renderSentence(summary, `<span class="author">${escapeHtml(first.author)}</span>`)}</div>
     ${lines}
   </div>`;
 }
 
-function renderTimelineItem(item: IPrTimelineItem, prUrl: string, now: number): string {
-  const action = item.kind === "review" ? (REVIEW_STATE_LABELS[item.reviewState ?? ""] ?? "reviewed") : "commented";
+function renderTimelineItem(item: IPrTimelineItem, prUrl: string, now: number, strings: IPrDetailsStrings): string {
+  const action = item.kind === "review"
+    ? strings.reviewTimeline.get(item.reviewState ?? "") ?? strings.timelineReviewed
+    : strings.timelineCommented;
+  const summary = action("{0}", formatRelativeDate(item.createdAt, now, strings));
   const reviewClass = item.kind === "review" ? ` review-${escapeHtml(item.reviewState ?? "")}` : "";
   const icon = item.kind === "review" ? (REVIEW_STATE_ICONS[item.reviewState ?? ""] ?? "●") : REVIEW_STATE_ICONS.COMMENTED;
   const iconClass = item.kind === "review" && item.reviewState ? ` ${escapeHtml(item.reviewState)}` : "";
   const hasBody = item.bodyHtml !== "";
   const codeComments =
     item.codeCommentsCount && item.codeCommentsCount > 0
-      ? `<div class="code-comments"><a href="${escapeHtml(prUrl)}/files">${item.codeCommentsCount} ${item.codeCommentsCount === 1 ? "comment" : "comments"} on files</a></div>`
+      ? `<div class="code-comments"><a href="${escapeHtml(prUrl)}/files">${escapeHtml((item.codeCommentsCount === 1 ? strings.codeComment : strings.codeComments)(item.codeCommentsCount))}</a></div>`
       : "";
   return `
   <div class="box${reviewClass}${hasBody ? "" : " no-body"}">
     ${renderAvatar(item.avatarUrl, item.author)}
     <div class="box-header">
-      <span><span class="review-icon${iconClass}">${icon}</span> <span class="author">${escapeHtml(item.author)}</span> ${action} ${formatRelativeDate(item.createdAt, now)}</span>
+      <span><span class="review-icon${iconClass}">${icon}</span> ${renderSentence(summary, `<span class="author">${escapeHtml(item.author)}</span>`)}</span>
     </div>
     ${hasBody ? `<div class="box-body">${item.bodyHtml}</div>` : ""}
     ${codeComments}
@@ -800,8 +789,10 @@ function renderTimelineItem(item: IPrTimelineItem, prUrl: string, now: number): 
 const FAILING_CHECK_STATES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED", "ACTION_REQUIRED"]);
 const PASSED_CHECK_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
-function renderMergeBox(details: IPrDetails, defaultUpdateMethod: UpdateBranchMethod): string {
-  const decision = details.reviewDecision ? (REVIEW_DECISION_LABELS[details.reviewDecision] ?? details.reviewDecision) : "● No review required";
+function renderMergeBox(details: IPrDetails, defaultUpdateMethod: UpdateBranchMethod, strings: IPrDetailsStrings): string {
+  const decision = details.reviewDecision
+    ? strings.reviewDecisions.get(details.reviewDecision) ?? details.reviewDecision
+    : strings.noReviewRequired;
   const decisionClass = details.reviewDecision === "APPROVED" ? "ok" : details.reviewDecision === "CHANGES_REQUESTED" ? "ko" : "neutral";
 
   const truncatedChecksCount = details.checksTotal - details.checks.length;
@@ -810,16 +801,16 @@ function renderMergeBox(details: IPrDetails, defaultUpdateMethod: UpdateBranchMe
   let checksSummary: string;
   let checksClass: string;
   if (details.checks.length === 0) {
-    checksSummary = "● No checks";
+    checksSummary = strings.noChecks;
     checksClass = "neutral";
   } else if (failedChecksCount > 0) {
-    checksSummary = `✗ ${failedChecksCount} failing ${failedChecksCount === 1 ? "check" : "checks"}`;
+    checksSummary = (failedChecksCount === 1 ? strings.checkFailing : strings.checksFailing)(failedChecksCount);
     checksClass = "ko";
   } else if (inProgressChecksCount > 0) {
-    checksSummary = `● ${inProgressChecksCount} ${inProgressChecksCount === 1 ? "check" : "checks"} in progress`;
+    checksSummary = (inProgressChecksCount === 1 ? strings.checkInProgress : strings.checksInProgress)(inProgressChecksCount);
     checksClass = "pending";
   } else {
-    checksSummary = "✓ All checks passed";
+    checksSummary = strings.checksPassed;
     checksClass = "ok";
   }
   const checksList = details.checks
@@ -828,7 +819,7 @@ function renderMergeBox(details: IPrDetails, defaultUpdateMethod: UpdateBranchMe
       return `<li class="check-${escapeHtml(check.status)}">${name}</li>`;
     })
     .join("");
-  const moreChecks = truncatedChecksCount > 0 ? `<li>+${truncatedChecksCount} more on GitHub</li>` : "";
+  const moreChecks = truncatedChecksCount > 0 ? `<li>${escapeHtml(strings.moreChecks(truncatedChecksCount))}</li>` : "";
 
   const mergeableClass = details.mergeable === "MERGEABLE" ? "ok" : details.mergeable === "CONFLICTING" ? "ko" : "neutral";
 
@@ -836,79 +827,84 @@ function renderMergeBox(details: IPrDetails, defaultUpdateMethod: UpdateBranchMe
   const canMerge = isOpen && !details.isDraft && details.mergeMethods.length > 0;
   const canMarkReady = isOpen && details.isDraft && details.viewerDidAuthor;
   const methodOptions = details.mergeMethods
-    .map((method) => `<option value="${method}">${MERGE_METHOD_LABELS[method]}</option>`)
+    .map((method) => `<option value="${method}">${escapeHtml(strings.mergeMethods[method])}</option>`)
     .join("");
 
   const updateMethodsInOrder: UpdateBranchMethod[] = defaultUpdateMethod === "MERGE" ? ["MERGE", "REBASE"] : ["REBASE", "MERGE"];
   const updateMethodOptions = updateMethodsInOrder
-    .map((method) => `<option value="${method}">${UPDATE_METHOD_LABELS[method]}</option>`)
+    .map((method) => `<option value="${method}">${escapeHtml(strings.updateMethods[method])}</option>`)
     .join("");
   const updateBranchRow =
     isOpen && details.isBehindBase
       ? `<div class="row merge-actions">
-          <span class="neutral">This branch is out-of-date with the base branch</span>
-          <button id="update-branch">Update branch</button>
-          <select id="update-method" aria-label="Update method">${updateMethodOptions}</select>
+          <span class="neutral">${escapeHtml(strings.branchBehind)}</span>
+          <button id="update-branch">${escapeHtml(strings.updateBranch)}</button>
+          <select id="update-method" aria-label="${escapeHtml(strings.updateMethod)}">${updateMethodOptions}</select>
         </div>`
       : "";
 
   const actionButtons: string[] = [];
   if (isOpen) {
-    actionButtons.push(`<button id="checkout">Checkout branch</button>`);
+    actionButtons.push(`<button id="checkout">${escapeHtml(strings.checkoutBranch)}</button>`);
   }
   if (canMarkReady) {
-    actionButtons.push(`<button id="ready" class="btn-approve">Ready for review</button>`);
+    actionButtons.push(`<button id="ready" class="btn-approve">${escapeHtml(strings.readyForReview)}</button>`);
   }
   if (canMerge) {
-    actionButtons.push(`<button id="merge" class="btn-merge">Merge pull request</button><select id="merge-method" aria-label="Merge method">${methodOptions}</select>`);
+    actionButtons.push(`<button id="merge" class="btn-merge">${escapeHtml(strings.mergePr)}</button><select id="merge-method" aria-label="${escapeHtml(strings.mergeMethod)}">${methodOptions}</select>`);
   }
   const mergeActions = actionButtons.length > 0 ? `<div class="row merge-actions">${actionButtons.join("")}</div>` : "";
 
   return `
   <div class="merge-box">
-    <div class="row ${decisionClass}">${decision}</div>
-    <div class="row ${checksClass}">${checksSummary}${checksList ? `<ul>${checksList}${moreChecks}</ul>` : ""}</div>
-    <div class="row ${mergeableClass}">${MERGEABLE_LABELS[details.mergeable]}</div>
+    <div class="row ${decisionClass}">${escapeHtml(decision)}</div>
+    <div class="row ${checksClass}">${escapeHtml(checksSummary)}${checksList ? `<ul>${checksList}${moreChecks}</ul>` : ""}</div>
+    <div class="row ${mergeableClass}">${escapeHtml(strings.mergeability[details.mergeable])}</div>
     ${updateBranchRow}
     ${mergeActions}
   </div>`;
 }
 
-function renderComposer(details: IPrDetails): string {
+function renderComposer(details: IPrDetails, strings: IPrDetailsStrings): string {
   const canReview = !details.viewerDidAuthor && details.state === "OPEN";
   const approveDisabled = !details.canApprove;
-  const approveAttrs = approveDisabled ? ` disabled title="You already approved this Pull Request"` : "";
+  const approveAttrs = approveDisabled ? ` disabled title="${escapeHtml(strings.alreadyApproved)}"` : "";
   const reviewButtons = canReview
-    ? `<button id="request-changes" class="btn-danger">Request changes</button>
-       <button id="approve" class="btn-approve"${approveAttrs}>Approve</button>`
+    ? `<button id="request-changes" class="btn-danger">${escapeHtml(strings.requestChanges)}</button>
+       <button id="approve" class="btn-approve"${approveAttrs}>${escapeHtml(strings.approve)}</button>`
     : "";
   const pendingCount = details.pendingReviewCommentCount;
-  const pendingActions = canReview ? "Comment, Approve or Request changes" : "Comment";
-  const draftCountLabel = pendingCount === 1 ? "1 draft comment" : `${pendingCount} draft comments`;
+  const pendingActions = canReview ? strings.pendingReviewActions : strings.comment;
   // a pending review can outlive its last draft: only mention drafts when there are some
-  const draftSuffix = pendingCount === 0 ? "" : ` with ${draftCountLabel}`;
-  const pendingHint =
-    pendingCount === null
-      ? ""
-      : `<div class="neutral">You have a pending review${draftSuffix} — ${pendingActions} will submit it.</div>`;
+  let pendingHint = "";
+  if (pendingCount !== null) {
+    pendingHint = pendingCount === 0
+      ? strings.pendingReview(pendingActions)
+      : (pendingCount === 1 ? strings.pendingReviewWithDraft : strings.pendingReviewWithDrafts)(pendingCount, pendingActions);
+  }
   return `
   <div class="composer">
-    ${pendingHint}
-    <textarea id="composer-text" placeholder="Leave a comment"></textarea>
+    ${pendingHint ? `<div class="neutral">${escapeHtml(pendingHint)}</div>` : ""}
+    <textarea id="composer-text" placeholder="${escapeHtml(strings.leaveComment)}"></textarea>
     <div class="buttons">
       ${reviewButtons}
-      <button id="comment">Comment</button>
+      <button id="comment">${escapeHtml(strings.comment)}</button>
     </div>
   </div>`;
 }
 
-function renderSidebar(details: IPrDetails): string {
-  const reviewers = details.reviewers
-    .map(
-      (reviewer) =>
-        `<li><span>${escapeHtml(reviewer.name)}</span><span class="reviewer-state ${escapeHtml(reviewer.state)}${reviewer.isStale ? " stale" : ""}">${REVIEW_STATE_ICONS[reviewer.state] ?? "●"} ${escapeHtml(reviewer.state.toLowerCase().replaceAll("_", " "))}${reviewer.isStale ? " · stale" : ""}</span></li>`,
-    )
-    .join("");
+function reviewerStateLabel(state: string, strings: IPrDetailsStrings): string {
+  return strings.reviewerStates.get(state) ?? state.toLowerCase().replaceAll("_", " ");
+}
+
+function renderSidebar(details: IPrDetails, strings: IPrDetailsStrings): string {
+  const reviewers = details.reviewers.map((reviewer) => {
+    const state = reviewerStateLabel(reviewer.state, strings);
+    const label = reviewer.isStale ? strings.reviewerStale(state) : state;
+    const icon = REVIEW_STATE_ICONS[reviewer.state] ?? "●";
+    const stateClass = `${escapeHtml(reviewer.state)}${reviewer.isStale ? " stale" : ""}`;
+    return `<li><span>${escapeHtml(reviewer.name)}</span><span class="reviewer-state ${stateClass}">${icon} ${escapeHtml(label)}</span></li>`;
+  }).join("");
 
   const labels = details.labels
     .map((label) => {
@@ -922,17 +918,17 @@ function renderSidebar(details: IPrDetails): string {
   return `
   <aside class="sidebar">
     <section>
-      <h2>Reviewers</h2>
-      ${reviewers ? `<ul>${reviewers}</ul>` : `<span class="neutral">No reviewers yet</span>`}
+      <h2>${escapeHtml(strings.reviewers)}</h2>
+      ${reviewers ? `<ul>${reviewers}</ul>` : `<span class="neutral">${escapeHtml(strings.noReviewers)}</span>`}
     </section>
     <section>
-      <h2>Labels</h2>
-      ${labels || `<span class="neutral">None</span>`}
+      <h2>${escapeHtml(strings.labels)}</h2>
+      ${labels || `<span class="neutral">${escapeHtml(strings.none)}</span>`}
     </section>
     <section>
-      <h2>Files changed</h2>
+      <h2>${escapeHtml(strings.filesChanged)}</h2>
       <div class="stats-line">
-        <a href="${escapeHtml(details.url)}/files">${details.changedFiles} ${details.changedFiles === 1 ? "file" : "files"}</a> ·
+        <a href="${escapeHtml(details.url)}/files">${escapeHtml((details.changedFiles === 1 ? strings.file : strings.files)(details.changedFiles))}</a> ·
         <span class="diffstat"><span class="add">+${details.additions}</span> <span class="del">−${details.deletions}</span></span>
       </div>
     </section>
@@ -1077,6 +1073,7 @@ export function renderPrDetailsHtml(
   details: IPrDetails,
   nonce: string,
   now: number,
+  strings: IPrDetailsStrings,
   mermaidScriptUri?: string,
   defaultUpdateMethod: UpdateBranchMethod = "REBASE",
   brief?: IBriefState,
@@ -1089,27 +1086,27 @@ export function renderPrDetailsHtml(
     bodyHtml: processBody(details.bodyHtml),
     timeline: details.timeline.map((item) => ({ ...item, bodyHtml: processBody(item.bodyHtml) })),
   };
-  const timelineItems = renderTimeline(processedDetails.timeline, processedDetails.url, now);
-  const olderLink = processedDetails.timelineTruncated ? `<a class="older-link" href="${escapeHtml(processedDetails.url)}">View older conversation on GitHub</a>` : "";
+  const timelineItems = renderTimeline(processedDetails.timeline, processedDetails.url, now, strings);
+  const olderLink = processedDetails.timelineTruncated ? `<a class="older-link" href="${escapeHtml(processedDetails.url)}">${escapeHtml(strings.olderConversation)}</a>` : "";
   const mermaidSupport = renderMermaidSupport(processedDetails, nonce, mermaidScriptUri);
 
-  const strings = DEFAULT_IMAGE_VIEWER_STRINGS;
+  const imageStrings = strings.imageViewer;
   const body = `
-  ${renderHeader(processedDetails, brief)}
+  ${renderHeader(processedDetails, strings, brief)}
   <div class="layout">
     <main>
-      ${renderBriefSection(brief)}
+      ${renderBriefSection(strings, brief)}
       <div class="timeline">
-        ${renderDescription(processedDetails, now)}
+        ${renderDescription(processedDetails, now, strings)}
         ${timelineItems}
       </div>
       ${olderLink}
-      ${renderMergeBox(processedDetails, defaultUpdateMethod)}
-      ${renderComposer(processedDetails)}
+      ${renderMergeBox(processedDetails, defaultUpdateMethod, strings)}
+      ${renderComposer(processedDetails, strings)}
     </main>
-    ${renderSidebar(processedDetails)}
+    ${renderSidebar(processedDetails, strings)}
   </div>
-  <div class="ghcc-lightbox" id="ghcc-lightbox" role="dialog" aria-modal="true" aria-label="${escapeHtml(strings.imageLightbox)}">
+  <div class="ghcc-lightbox" id="ghcc-lightbox" role="dialog" aria-modal="true" aria-label="${escapeHtml(imageStrings.imageLightbox)}">
     <div class="lb-bar">
       <div class="lb-left">
         <span class="lb-counter" id="lb-counter" hidden></span>
@@ -1117,18 +1114,18 @@ export function renderPrDetailsHtml(
         <span class="lb-dim" id="lb-dim"></span>
       </div>
       <div class="lb-tools">
-        ${renderBackdropSwatches("lb-swatches", strings)}
+        ${renderBackdropSwatches("lb-swatches", imageStrings)}
         <span class="ghcc-sep"></span>
-        ${renderZoomToolbarControls("lb", strings, pixelated)}
+        ${renderZoomToolbarControls("lb", imageStrings, pixelated)}
         <span class="ghcc-sep"></span>
-        <a class="ghcc-btn" id="lb-github" href="${escapeHtml(processedDetails.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(strings.openGitHub)}" data-tooltip="${escapeHtml(strings.openGitHub)}">${IMAGE_VIEWER_ICONS.externalLink}</a>
-        <button class="ghcc-btn" type="button" id="lb-close" aria-label="${escapeHtml(strings.close)}" data-tooltip="${escapeHtml(strings.close)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.close}</button>
+        <a class="ghcc-btn" id="lb-github" href="${escapeHtml(processedDetails.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(imageStrings.openGitHub)}" data-tooltip="${escapeHtml(imageStrings.openGitHub)}">${IMAGE_VIEWER_ICONS.externalLink}</a>
+        <button class="ghcc-btn" type="button" id="lb-close" aria-label="${escapeHtml(imageStrings.close)}" data-tooltip="${escapeHtml(imageStrings.close)}" data-tooltip-align="right">${IMAGE_VIEWER_ICONS.close}</button>
       </div>
     </div>
     <div class="lb-stage ghcc-surface${pixelated ? " pixelated" : ""}" id="lb-stage" data-bg="checker">
-      <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(strings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
+      <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(imageStrings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
       <img class="canvas-img" id="lb-img" alt="">
-      <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(strings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
+      <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(imageStrings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
     </div>
   </div>`;
 
@@ -1138,6 +1135,7 @@ export function renderPrDetailsHtml(
     const prKey = ${safeJsonForScript(`${processedDetails.repo}#${processedDetails.number}`)};
     const prUrl = ${safeJsonForScript(processedDetails.url)};
     const EXPAND_ICON_SVG = ${safeJsonForScript(IMAGE_VIEWER_ICONS.expand)};
+    const IMAGE_STRINGS = ${safeJsonForScript(imageStrings)};
     const composerText = document.getElementById("composer-text");
     const allButtons = Array.from(document.querySelectorAll("button")).filter((button) => !button.closest?.(".ghcc-lightbox"));
     const requestedImages = new WeakSet();
@@ -1150,8 +1148,8 @@ export function renderPrDetailsHtml(
       placeholder.className = "image-fallback";
       const link = document.createElement("a");
       link.href = url || prUrl;
-      link.textContent = "Open on GitHub";
-      placeholder.append((message || "Could not load this image.") + " ", link);
+      link.textContent = IMAGE_STRINGS.openGitHub;
+      placeholder.append((message || IMAGE_STRINGS.loadFailed) + " ", link);
       const target = image.closest(".ghcc-inline-img-wrap") || image.closest("picture") || image;
       const parent = target.parentElement;
       if (parent?.matches("a") && parent.children.length === 1 && !parent.textContent.trim()) {
@@ -1168,7 +1166,7 @@ export function renderPrDetailsHtml(
       requestedImages.add(image);
       const src = image.currentSrc || image.getAttribute("src") || "";
       if (/^data:/i.test(src)) {
-        showImageFallback(image, prUrl, src === "data:," ? "The image exceeds the 10 MB preview limit." : undefined);
+        showImageFallback(image, prUrl, src === "data:," ? IMAGE_STRINGS.tooLarge : undefined);
         return;
       }
       const requestId = crypto.randomUUID();
@@ -1589,5 +1587,5 @@ export function renderPrDetailsHtml(
 ${mermaidSupport.bootstrap}
   </script>`;
 
-  return htmlDocument(nonce, body, mermaidSupport.scriptTag + script);
+  return htmlDocument(nonce, body, strings.lang, mermaidSupport.scriptTag + script);
 }

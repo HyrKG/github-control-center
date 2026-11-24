@@ -1,5 +1,7 @@
-import { runInNewContext } from "node:vm";
-import { describe, expect, it, vi } from "vitest";
+import { runInNewContext, Script } from "node:vm";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
+import { createPrDetailsStrings } from "./PrDetailsStrings";
 import { renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails } from "../core/types";
 
@@ -55,7 +57,7 @@ function buildDetails(overrides: Partial<IPrDetails> = {}): IPrDetails {
 }
 
 function render(overrides: Partial<IPrDetails> = {}): string {
-  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW);
+  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, createPrDetailsStrings());
 }
 
 const MERMAID_URI = "vscode-resource://ext/dist/mermaid.min.js";
@@ -68,10 +70,43 @@ const MERMAID_SECTION =
   "<span>Loading</span></section>";
 
 function renderWithMermaid(overrides: Partial<IPrDetails> = {}): string {
-  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, MERMAID_URI);
+  return renderPrDetailsHtml(buildDetails(overrides), NONCE, NOW, createPrDetailsStrings(), MERMAID_URI);
 }
 
 describe("renderPrDetailsHtml", () => {
+  afterEach(() => setTestLocale());
+
+  it("falls back to English when a display language has no bundle", () => {
+    setTestLocale("fr");
+    const html = render({ bodyHtml: "" });
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("No description provided.");
+    expect(html).toContain('aria-label="Copy branch name"');
+  });
+
+  it("localizes the document and escapes data in reordered sentences", () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const html = render({
+      title: "<script>PR title</script>",
+      author: "<owner>",
+      baseRefName: "<main>",
+      headRefName: '<branch>"',
+      isBehindBase: true,
+      pendingReviewCommentCount: 2,
+      reviewers: [{ name: "mario", state: "APPROVED", isStale: true }],
+    });
+    expect(html).toContain('<html lang="zh-cn">');
+    expect(html).toContain("&lt;script&gt;PR title&lt;/script&gt;");
+    expect(html).toContain("<strong>&lt;owner&gt;</strong> 想将");
+    expect(html).toContain('&lt;branch&gt;&quot;</span><button id="copy-branch"');
+    expect(html).toContain('aria-label="复制分支名称"');
+    expect(html).toContain('aria-label="更新方式"');
+    expect(html).toContain('value="REBASE">通过变基更新');
+    expect(html).toContain('class="reviewer-state APPROVED stale">✓ 已批准（已过期）');
+    expect(html).toContain("2 条评论草稿");
+    expect(html).toContain("6 天前发表了评论");
+  });
+
   it("should escape HTML in interpolated fields so injected markup stays inert", () => {
     const html = render({ title: '<script>alert("boom")</script>' });
 
@@ -358,7 +393,7 @@ describe("renderPrDetailsHtml", () => {
     });
 
     it("should put the configured default update method first", () => {
-      const html = renderPrDetailsHtml(buildDetails({ isBehindBase: true }), NONCE, NOW, undefined, "MERGE");
+      const html = renderPrDetailsHtml(buildDetails({ isBehindBase: true }), NONCE, NOW, createPrDetailsStrings(), undefined, "MERGE");
 
       const rebaseIndex = html.indexOf('<option value="REBASE">');
       const mergeIndex = html.indexOf('<option value="MERGE">');
@@ -623,7 +658,7 @@ describe("renderPrDetailsHtml", () => {
 
   describe("brief section", () => {
     function renderWithBrief(brief: IBriefState): string {
-      return renderPrDetailsHtml(buildDetails(), NONCE, NOW, undefined, "REBASE", brief);
+      return renderPrDetailsHtml(buildDetails(), NONCE, NOW, createPrDetailsStrings(), undefined, "REBASE", brief);
     }
 
     it("should render neither button nor section when no brief state is passed", () => {
@@ -813,7 +848,7 @@ describe("conversation images", () => {
     details.bodyHtml = '<img src="./assets/画 %231.png"><img src="/user-attachments/assets/123">';
     details.timeline[0].bodyHtml = "<IMG SRC='docs/picture.png'>";
     details.timeline[1].bodyHtml = '<img src="/acme/repo/raw/main/images/screenshot.jpg">';
-    const html = renderPrDetailsHtml(details, NONCE, NOW);
+    const html = renderPrDetailsHtml(details, NONCE, NOW, createPrDetailsStrings());
 
     expect(html).toContain('src="https://github.com/contributor/fork/raw/head-oid/assets/%E7%94%BB%20%231.png"');
     expect(html).toContain('src="https://github.com/user-attachments/assets/123"');
@@ -932,7 +967,7 @@ describe("inline image lightbox", () => {
     expect(html).toContain('class="lb-stage ghcc-surface pixelated"');
     expect(html).toMatch(/id="lb-pixel"[^>]*aria-pressed="true"/);
 
-    const smoothHtml = renderPrDetailsHtml(buildDetails(), NONCE, NOW, undefined, "REBASE", undefined, false);
+    const smoothHtml = renderPrDetailsHtml(buildDetails(), NONCE, NOW, createPrDetailsStrings(), undefined, "REBASE", undefined, false);
     expect(smoothHtml).toContain('class="lb-stage ghcc-surface"');
     expect(smoothHtml).toMatch(/id="lb-pixel"[^>]*aria-pressed="false"/);
   });
@@ -1214,5 +1249,20 @@ describe("inline image lightbox", () => {
     dataWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
     expect(lbStage.classList.contains("pixelated")).toBe(false);
     expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("compiles all inline webview scripts cleanly and localizes lightbox and image fallback copy", () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const html = render();
+
+    const scripts = Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g), (match) => match[1].trim()).filter(Boolean);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const inlineScript of scripts) {
+      expect(() => new Script(inlineScript)).not.toThrow();
+    }
+
+    expect(html).toContain('aria-label="图片预览"');
+    expect(html).toContain('aria-label="临近插值 (P)"');
+    expect(html).toContain('"tooLarge":"图片超过 10 MB 预览上限。"');
   });
 });

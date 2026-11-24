@@ -1,3 +1,4 @@
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileTooLargeError } from "../github/github";
 import { BriefStore } from "../brief/briefState";
@@ -119,6 +120,42 @@ function buildAiDeps() {
 }
 
 describe("DetailsSession", () => {
+  afterEach(() => setTestLocale());
+
+  it("localizes confirmation and success while keeping the merge method stable", async () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const deps = buildDeps();
+    const session = new DetailsSession(deps);
+    const pr = buildPr();
+    try {
+      await session.openPrDetails(pr);
+      deps.promptModal.mockResolvedValueOnce(false);
+      session.handleMessage({ command: "merge", method: "SQUASH" });
+      await flush();
+      expect(deps.promptModal).toHaveBeenCalledWith("要通过“压缩提交并合并”将“A title”合入 main 吗？", "合并");
+      expect(deps.mergePr).not.toHaveBeenCalled();
+
+      session.handleMessage({ command: "merge", method: "SQUASH" });
+      await flush();
+      expect(deps.mergePr).toHaveBeenCalledWith("token", pr.id, "SQUASH");
+      expect(deps.notify.info).toHaveBeenCalledWith("已合并“A title”");
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("localizes the error wrapper and preserves the upstream detail", async () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const deps = buildDeps();
+    deps.fetchPrDetails.mockRejectedValueOnce(new Error("Resource not accessible"));
+    const session = new DetailsSession(deps);
+    await session.openPrDetails(buildPr());
+    expect(deps.panel.showMessage).toHaveBeenCalledWith(
+      "acme/repo · A title #1",
+      "加载拉取请求详情失败：Resource not accessible",
+    );
+  });
+
   describe("openPrDetails — stale-response guard", () => {
     it("keeps only the latest click's details, dropping a slower earlier fetch", async () => {
       const prA = buildPr({ id: "A" });

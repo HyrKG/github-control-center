@@ -1,10 +1,10 @@
 import { buildBriefPrompt, buildBriefSystemPrompt } from "../brief/briefPrompt";
 import type { BriefStore } from "../brief/briefState";
-import { toErrorMessage } from "../core/errors";
+import { toDiagnosticMessage, toErrorMessage } from "../core/errors";
 import { gitHubFileUrl, isGitHubImageLink, parseGitHubFileUrl } from "../github/fileUrls";
 import { FileTooLargeError, type IFileBytes } from "../github/github";
 import { imageDataUri } from "../review/PrImagePreview";
-import { MERGE_METHOD_LABELS, UPDATE_METHOD_LABELS } from "./PrDetailsHtml";
+import { createDetailsSessionStrings, mergeMethodLabels, updateMethodLabels } from "./PrDetailsStrings";
 import { formatPrTabTitle, type IImageResolution, type IPanelMessage } from "./PrDetailsPanel";
 import type { IBriefState, IPrDetails, IPrFile, IPrFilePatch, IPullRequest, MergeMethod, UpdateBranchMethod } from "../core/types";
 
@@ -68,6 +68,7 @@ type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | 
  * logic — previously only exercised by hand in the Extension Development Host — is unit-testable.
  */
 export class DetailsSession {
+  private readonly strings = createDetailsSessionStrings();
   private currentDetailsPr: IPullRequest | undefined;
   // paired with the PR it belongs to: currentDetailsPr can move (poll re-point) while a fetch is
   // still in flight, so anything combining details with PR data must check the prId matches
@@ -106,7 +107,7 @@ export class DetailsSession {
       return;
     }
     if (!session) {
-      this.deps.panel.showMessage(formatPrTabTitle(pr), "Sign in to GitHub to load pull request details.");
+      this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToLoad);
       return;
     }
     try {
@@ -116,7 +117,7 @@ export class DetailsSession {
       }
     } catch (error) {
       if (requestId === this.detailsRequestSequence) {
-        this.deps.panel.showMessage(formatPrTabTitle(pr), `Failed to load pull request details: ${toErrorMessage(error)}`);
+        this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.loadFailed(toErrorMessage(error)));
       }
     }
   }
@@ -146,7 +147,7 @@ export class DetailsSession {
       }
       this.presentDetails(pr, details, "silent");
     } catch (error) {
-      this.deps.log(`[${new Date().toISOString()}] Details refresh failed: ${toErrorMessage(error)}`);
+      this.deps.log(`[${new Date().toISOString()}] Details refresh failed: ${toDiagnosticMessage(error)}`);
     }
   }
 
@@ -166,7 +167,7 @@ export class DetailsSession {
         }
       } catch (error) {
         if (error instanceof FileTooLargeError) {
-          result.message = error.message;
+          result.message = toErrorMessage(error);
         }
       }
     }
@@ -327,7 +328,7 @@ export class DetailsSession {
       this.deps.persistBriefs();
     } catch (error) {
       this.deps.briefStore.fail(pr.id, pr.headRefOid, toErrorMessage(error));
-      this.deps.log(`[${new Date().toISOString()}] Brief failed: ${toErrorMessage(error)}`);
+      this.deps.log(`[${new Date().toISOString()}] Brief failed: ${toDiagnosticMessage(error)}`);
     } finally {
       this.rerenderBriefFor(pr.id);
     }
@@ -337,7 +338,7 @@ export class DetailsSession {
     const session = await this.deps.getSession(false);
     if (!session) {
       this.composerHasText = false; // this render drops the composer too
-      this.deps.panel.showMessage(formatPrTabTitle(pr), "Sign in to GitHub to act on pull requests.");
+      this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToAct);
       return;
     }
     this.mutationInFlight = true;
@@ -351,7 +352,7 @@ export class DetailsSession {
       clearTimeout(this.postMutationTimer);
       this.postMutationTimer = setTimeout(() => void this.deps.refresh(), POST_MUTATION_REFRESH_DELAY_MS);
     } catch (error) {
-      this.deps.notify.error(`${actionLabel} failed: ${toErrorMessage(error)}`);
+      this.deps.notify.error(this.strings.actionFailed(actionLabel, toErrorMessage(error)));
       this.deps.panel.reenableActions();
     } finally {
       this.mutationInFlight = false;
@@ -365,34 +366,34 @@ export class DetailsSession {
         if (this.hasPendingReview(pr)) {
           // GitHub "Finish your review" parity: the comment submits the pending review (drafts
           // publish, so it gets a confirmation unlike a plain comment); empty text is legal here
-          const confirmed = await this.confirmAction(`Submit review with your draft comments: "${pr.title}"?`, "Submit review");
+          const confirmed = await this.confirmAction(this.strings.confirmSubmit(pr.title), this.strings.submitReview);
           if (!confirmed) {
             this.deps.panel.reenableActions();
             return;
           }
-          await this.runPrMutation(pr, "Submit review", `Review submitted: ${pr.title}`, (token) => this.deps.submitPendingReview(token, pr.id, "COMMENT", commentText));
+          await this.runPrMutation(pr, this.strings.submitReview, this.strings.submitted(pr.title), (token) => this.deps.submitPendingReview(token, pr.id, "COMMENT", commentText));
           return;
         }
         if (!commentText) {
           this.deps.panel.reenableActions();
           return;
         }
-        await this.runPrMutation(pr, "Comment", `Comment posted on: ${pr.title}`, (token) => this.deps.addPrComment(token, pr.id, commentText));
+        await this.runPrMutation(pr, this.strings.comment, this.strings.commentPosted(pr.title), (token) => this.deps.addPrComment(token, pr.id, commentText));
         return;
       }
       case "review": {
         const isRequestingChanges = message.event === "REQUEST_CHANGES";
         const reviewText = message.text.trim();
         if (isRequestingChanges && !reviewText) {
-          this.deps.notify.warning("Request changes needs a comment explaining what to change.");
+          this.deps.notify.warning(this.strings.needsComment);
           this.deps.panel.reenableActions();
           return;
         }
         const hasPendingReview = this.hasPendingReview(pr);
-        const actionLabel = isRequestingChanges ? "Request changes" : "Approve";
-        const successMessage = isRequestingChanges ? `Changes requested on: ${pr.title}` : `Approved: ${pr.title}`;
+        const actionLabel = isRequestingChanges ? this.strings.requestChanges : this.strings.approve;
+        const successMessage = isRequestingChanges ? this.strings.changesRequested(pr.title) : this.strings.approved(pr.title);
         // the pending path publishes the draft inline comments too: the confirmation must say so
-        const confirmMessage = hasPendingReview ? `${actionLabel} and submit your draft comments: "${pr.title}"?` : `${actionLabel}: "${pr.title}"?`;
+        const confirmMessage = hasPendingReview ? this.strings.confirmWithDrafts(actionLabel, pr.title) : this.strings.confirmReview(actionLabel, pr.title);
         const confirmed = await this.confirmAction(confirmMessage, actionLabel);
         if (!confirmed) {
           this.deps.panel.reenableActions();
@@ -420,17 +421,17 @@ export class DetailsSession {
           this.deps.panel.reenableActions();
           return;
         }
-        const methodLabel = MERGE_METHOD_LABELS[message.method];
-        const confirmed = await this.confirmAction(`${methodLabel}: "${pr.title}" into ${openDetails.baseRefName}?`, "Merge");
+        const methodLabel = mergeMethodLabels()[message.method];
+        const confirmed = await this.confirmAction(this.strings.confirmMerge(methodLabel, pr.title, openDetails.baseRefName), this.strings.merge);
         if (!confirmed) {
           this.deps.panel.reenableActions();
           return;
         }
-        await this.runPrMutation(pr, "Merge", `Merged: ${pr.title}`, (token) => this.deps.mergePr(token, pr.id, message.method));
+        await this.runPrMutation(pr, this.strings.merge, this.strings.merged(pr.title), (token) => this.deps.mergePr(token, pr.id, message.method));
         return;
       }
       case "readyForReview": {
-        await this.runPrMutation(pr, "Ready for review", `Marked as ready for review: ${pr.title}`, (token) => this.deps.markPrReadyForReview(token, pr.id));
+        await this.runPrMutation(pr, this.strings.readyForReview, this.strings.markedReady(pr.title), (token) => this.deps.markPrReadyForReview(token, pr.id));
         return;
       }
       case "updateBranch": {
@@ -440,8 +441,8 @@ export class DetailsSession {
           this.deps.panel.reenableActions();
           return;
         }
-        const methodLabel = UPDATE_METHOD_LABELS[message.method];
-        await this.runPrMutation(pr, methodLabel, `Branch updated (${message.method.toLowerCase()}): ${pr.title}`, (token) => this.deps.updatePrBranch(token, pr.id, message.method));
+        const methodLabel = updateMethodLabels()[message.method];
+        await this.runPrMutation(pr, methodLabel, this.strings.branchUpdated(this.strings.branchUpdateMethod(message.method), pr.title), (token) => this.deps.updatePrBranch(token, pr.id, message.method));
         return;
       }
       case "brief": {
@@ -468,7 +469,7 @@ export class DetailsSession {
     }
     if (details.headRepo !== details.repo) {
       // ponytail: cross-fork checkout needs pull/N/head refspecs — use GitHub until it hurts
-      this.deps.notify.error("Checkout of cross-fork PRs is not supported. Open the PR on GitHub instead.");
+      this.deps.notify.error(this.strings.forkCheckoutUnavailable);
       this.deps.panel.reenableActions();
       return;
     }

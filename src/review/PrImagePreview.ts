@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
+import { toErrorMessage } from "../core/errors";
 import { FileTooLargeError, type IFileBytes } from "../github/github";
 import { gitHubFileUrl } from "../github/fileUrls";
 import { escapeHtml } from "../core/html";
@@ -14,6 +15,7 @@ import {
   safeJsonForScript,
   type IImageViewerStrings,
 } from "../core/imageViewer";
+import { createImageViewerStrings, viewerLanguage } from "../core/imageViewerStrings";
 import { MAX_IMAGE_BYTES, type FileChangeType } from "../core/types";
 
 const IMAGE_TYPES = new Map([
@@ -105,8 +107,9 @@ export class PrImagePreview implements vscode.Disposable {
 
   constructor(
     private readonly readFile: (side: IImageSide) => Promise<IFileBytes>,
-    private readonly strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS,
+    private readonly getStrings: IImageViewerStrings | (() => IImageViewerStrings) = createImageViewerStrings,
     private readonly preference?: IImagePixelatedPreference,
+    private readonly getLanguage: string | (() => string) = viewerLanguage,
   ) {
     this.pixelated = preference ? preference.get() : true;
   }
@@ -121,6 +124,9 @@ export class PrImagePreview implements vscode.Disposable {
       return;
     }
 
+    const strings = typeof this.getStrings === "function" ? this.getStrings() : this.getStrings;
+    const language = typeof this.getLanguage === "function" ? this.getLanguage() : this.getLanguage;
+
     const panel =
       existing?.panel ??
       vscode.window.createWebviewPanel("githubControlCenter.prImagePreview", title, vscode.ViewColumn.Active, {
@@ -130,8 +136,8 @@ export class PrImagePreview implements vscode.Disposable {
     panel.title = title;
 
     const activeSides = [
-      { side: "base" as const, label: this.strings.base, source: left },
-      { side: "head" as const, label: this.strings.head, source: right },
+      { side: "base" as const, label: strings.base, source: left },
+      { side: "head" as const, label: strings.head, source: right },
     ].filter(({ source }) => !source.isEmpty);
 
     const isRenamed = changeType === "RENAMED" && !left.isEmpty && !right.isEmpty && left.path !== right.path;
@@ -147,7 +153,7 @@ export class PrImagePreview implements vscode.Disposable {
         path: source.path,
         url: gitHubFileUrl({ repo: source.repo, ref: source.sha, path: source.path }),
         status: "loading",
-        message: this.strings.loading,
+        message: strings.loading,
       })),
     };
 
@@ -182,11 +188,18 @@ export class PrImagePreview implements vscode.Disposable {
       });
     }
 
-    panel.webview.html = renderImagePreviewHtml(snapshot, randomUUID(), this.strings, this.pixelated);
+    panel.webview.html = renderImagePreviewHtml(
+      snapshot,
+      randomUUID(),
+      strings,
+      this.pixelated,
+      language,
+      vscode.l10n.t("PR image preview"),
+    );
 
     await Promise.all(
       activeSides.map(async ({ source }, index) => {
-        const loaded = await this.load(source);
+        const loaded = await this.load(source, strings);
         if (this.panels.get(key) !== request) {
           return;
         }
@@ -199,18 +212,21 @@ export class PrImagePreview implements vscode.Disposable {
     );
   }
 
-  private async load(side: IImageSide): Promise<Pick<IImagePreviewSideState, "status" | "dataUri" | "size" | "message">> {
+  private async load(
+    side: IImageSide,
+    strings: IImageViewerStrings,
+  ): Promise<Pick<IImagePreviewSideState, "status" | "dataUri" | "size" | "message">> {
     try {
       const file = await this.readFile(side);
       const dataUri = imageDataUri(side.path, file);
       return dataUri
         ? { status: "ready", dataUri, size: file.bytes.byteLength, message: undefined }
-        : { status: "unsupported", dataUri: undefined, size: undefined, message: this.strings.unsupported };
+        : { status: "unsupported", dataUri: undefined, size: undefined, message: strings.unsupported };
     } catch (error) {
       if (error instanceof FileTooLargeError) {
-        return { status: "toolarge", dataUri: undefined, size: undefined, message: error.message };
+        return { status: "toolarge", dataUri: undefined, size: undefined, message: toErrorMessage(error) };
       }
-      return { status: "error", dataUri: undefined, size: undefined, message: this.strings.loadFailed };
+      return { status: "error", dataUri: undefined, size: undefined, message: strings.loadFailed };
     }
   }
 
@@ -547,6 +563,8 @@ export function renderImagePreviewHtml(
   nonce: string,
   strings: IImageViewerStrings = DEFAULT_IMAGE_VIEWER_STRINGS,
   pixelated = true,
+  language = "en",
+  documentTitle = "PR image preview",
 ): string {
   const pill = changeTypeStatus(snapshot.changeType, strings);
   const defaultUrl =
@@ -560,11 +578,11 @@ export function renderImagePreviewHtml(
   });
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${escapeHtml(language)}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${escapeHtml(nonce)}';">
-  <title>PR image preview</title>
+  <title>${escapeHtml(documentTitle)}</title>
   <style>${PREVIEW_STYLE}</style>
 </head>
 <body>
@@ -866,7 +884,7 @@ export function renderImagePreviewHtml(
         }
       }
 
-      function createCanvasImg(side, onLoaded) {
+      function createCanvasImg(side, onLoaded, onError) {
         const img = document.createElement("img");
         img.className = "canvas-img";
         img.alt = side.path;
@@ -878,10 +896,13 @@ export function renderImagePreviewHtml(
             img.width = nw;
             img.height = nh;
             state.dims[side.side] = { w: nw, h: nh };
+            onLoaded();
+          } else {
+            onError?.();
           }
-          onLoaded();
         };
         img.addEventListener("load", handleLoad);
+        img.addEventListener("error", () => onError?.());
         img.src = side.dataUri || "";
         if (img.complete && img.naturalWidth > 0) {
           handleLoad();
@@ -889,7 +910,34 @@ export function renderImagePreviewHtml(
         return img;
       }
 
-      function updateMetaDisplays() {
+      function onImageError(targetSide) {
+        if (!targetSide || targetSide.status === "error") {
+          return;
+        }
+        const entry = state.snapshot.sides.find((s) => s.side === targetSide.side);
+        if (entry) {
+          entry.status = "error";
+          entry.dataUri = undefined;
+          entry.message = STRINGS.loadFailed;
+        }
+        delete state.dims[targetSide.side];
+        renderStage({ forceRebuild: true, preserveTransform: !ctrl.state.isFitted });
+      }
+
+      function onImageReady(preserveTransform) {
+        state.snapshot.sides.forEach((side) => {
+          const paneRef = state.splitPanes[side.side];
+          if (paneRef?.headMeta) {
+            paneRef.headMeta.textContent = side.status === "ready" ? formatSideMeta(side) : "";
+          }
+        });
+        updateMetaDisplays();
+        if (preserveTransform && ctrl.state.hasFitted && !ctrl.state.isFitted) {
+          applyTransform(ctrl.state);
+        } else {
+          requestAnimationFrame(() => ctrl.fit());
+        }
+      }
 
       function createPaneHeader(side) {
         const head = document.createElement("div");
@@ -937,7 +985,7 @@ export function renderImagePreviewHtml(
           const vp = document.createElement("div");
           vp.className = "canvas-vp ghcc-surface" + (state.pixelated ? " pixelated" : "");
           vp.dataset.bg = state.bg;
-          const img = createCanvasImg(side, () => onImageReady(preserveTransform));
+          const img = createCanvasImg(side, () => onImageReady(preserveTransform), () => onImageError(side));
           vp.appendChild(img);
           paneRef.body.appendChild(vp);
           paneRef.vp = vp;
@@ -978,7 +1026,7 @@ export function renderImagePreviewHtml(
             delete sv.imgs[side.side];
           }
           if (side.status === "ready" && side.dataUri) {
-            const img = createCanvasImg(side, () => onImageReady(preserveTransform));
+            const img = createCanvasImg(side, () => onImageReady(preserveTransform), () => onImageError(side));
             img.hidden = side.side !== state.activeSide;
             sv.vp.appendChild(img);
             sv.imgs[side.side] = img;
@@ -1088,12 +1136,12 @@ export function renderImagePreviewHtml(
 
           const baseLayer = document.createElement("div");
           baseLayer.className = "swipe-layer";
-          const baseImg = createCanvasImg(base, () => onImageReady(preserveTransform));
+          const baseImg = createCanvasImg(base, () => onImageReady(preserveTransform), () => onImageError(base));
           baseLayer.appendChild(baseImg);
 
           const headLayer = document.createElement("div");
           headLayer.className = "swipe-layer";
-          const headImg = createCanvasImg(head, () => onImageReady(preserveTransform));
+          const headImg = createCanvasImg(head, () => onImageReady(preserveTransform), () => onImageError(head));
           headLayer.appendChild(headImg);
 
           const badgeL = document.createElement("div");

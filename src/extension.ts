@@ -25,13 +25,14 @@ import { ReviewController, type IPatchKey } from "./review/ReviewController";
 import { detectAi, runAiPrompt } from "./brief/ai";
 import { BriefStore, type PersistedBrief } from "./brief/briefState";
 import { DetailsSession } from "./panel/DetailsSession";
-import { toErrorMessage } from "./core/errors";
+import { LocalizedError, toDiagnosticMessage, toErrorMessage } from "./core/errors";
 import { toThreadPosition } from "./review/reviewThreads";
 import { ApprovalOverlay } from "./poll/ApprovalOverlay";
 import { applyFilters, partitionReviewed } from "./poll/filters";
 import { NewPrTracker } from "./poll/NewPrTracker";
 import { AsyncOidCache } from "./core/OidCache";
 import { PrContentProvider, fromPrUri, toPrUri } from "./review/PrContentProvider";
+import { createImageViewerStrings, viewerLanguage } from "./core/imageViewerStrings";
 import { imageMimeType, PrImagePreview } from "./review/PrImagePreview";
 import { PrDetailsPanel } from "./panel/PrDetailsPanel";
 import { PollScheduler } from "./poll/PollScheduler";
@@ -78,7 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function requireToken(): Promise<string> {
     const session = await getSession(false);
     if (!session) {
-      throw new Error("Sign in to GitHub first");
+      throw new LocalizedError("Sign in to GitHub first", vscode.l10n.t("Sign in to GitHub first"));
     }
     return session.accessToken;
   }
@@ -109,41 +110,43 @@ export function activate(context: vscode.ExtensionContext): void {
       pendingStatusBar.hide();
       return;
     }
-    pendingStatusBar.text = `$(comment-draft) PR #${pr.number}: ${count} pending`;
-    pendingStatusBar.tooltip = `Pending review on ${pr.repo}#${pr.number} — click to submit`;
+    pendingStatusBar.text = `$(comment-draft) ${vscode.l10n.t("PR #{0}: {1} pending", pr.number, count)}`;
+    pendingStatusBar.tooltip = vscode.l10n.t("Pending review on {0}#{1} — click to submit", pr.repo, pr.number);
     pendingStatusBar.command = "githubControlCenter.review.submit";
     pendingStatusBar.show();
   }
 
-  const REVIEW_EVENT_LABELS: Record<string, "COMMENT" | "APPROVE" | "REQUEST_CHANGES"> = {
-    Comment: "COMMENT",
-    Approve: "APPROVE",
-    "Request changes": "REQUEST_CHANGES",
-  };
+  interface IReviewEventItem extends vscode.QuickPickItem {
+    event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+  }
 
   async function submitActiveReview(): Promise<void> {
     const pr = reviewController.getActivePr();
     if (!pr || reviewController.getPendingReviewId(pr.id) === null) {
-      void vscode.window.showInformationMessage("No pending review to submit.");
+      void vscode.window.showInformationMessage(vscode.l10n.t("No pending review to submit."));
       return;
     }
-    const pickedLabel = await vscode.window.showQuickPick(Object.keys(REVIEW_EVENT_LABELS), {
-      placeHolder: `Submit your review of ${pr.repo}#${pr.number}`,
+    const picked = await vscode.window.showQuickPick<IReviewEventItem>([
+      { label: vscode.l10n.t("Comment"), event: "COMMENT" },
+      { label: vscode.l10n.t("Approve"), event: "APPROVE" },
+      { label: vscode.l10n.t("Request changes"), event: "REQUEST_CHANGES" },
+    ], {
+      placeHolder: vscode.l10n.t("Submit your review of {0}#{1}", pr.repo, pr.number),
     });
-    if (!pickedLabel) {
+    if (!picked) {
       return;
     }
-    const event = REVIEW_EVENT_LABELS[pickedLabel];
+    const { event } = picked;
     const body = await vscode.window.showInputBox({
-      prompt: event === "REQUEST_CHANGES" ? "Review summary (required to request changes)" : "Review summary (optional)",
-      placeHolder: "Leave a summary comment…",
+      prompt: event === "REQUEST_CHANGES" ? vscode.l10n.t("Review summary (required to request changes)") : vscode.l10n.t("Review summary (optional)"),
+      placeHolder: vscode.l10n.t("Leave a summary comment…"),
     });
     if (body === undefined) {
       return;
     }
     // GitHub rule: a changes request must carry a body (same gate as the details panel composer)
     if (event === "REQUEST_CHANGES" && !body.trim()) {
-      void vscode.window.showWarningMessage("Request changes requires a summary comment.");
+      void vscode.window.showWarningMessage(vscode.l10n.t("Request changes requires a summary comment."));
       return;
     }
     try {
@@ -151,11 +154,11 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event === "APPROVE") {
         approvalOverlay.record(pr.id, pr.headRefOid);
       }
-      void vscode.window.showInformationMessage(`Review submitted on ${pr.repo}#${pr.number}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Review submitted on {0}#{1}", pr.repo, pr.number));
       await reviewController.reload(pr);
       void refresh();
     } catch (error) {
-      void vscode.window.showErrorMessage(`Submitting the review failed: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Submitting the review failed: {0}", toErrorMessage(error)));
     }
   }
 
@@ -163,15 +166,16 @@ export function activate(context: vscode.ExtensionContext): void {
     const pr = reviewController.getActivePr();
     const pendingReviewId = pr ? reviewController.getPendingReviewId(pr.id) : null;
     if (!pr || pendingReviewId === null) {
-      void vscode.window.showInformationMessage("No pending review to discard.");
+      void vscode.window.showInformationMessage(vscode.l10n.t("No pending review to discard."));
       return;
     }
+    const discard = vscode.l10n.t("Discard");
     const confirmed = await vscode.window.showWarningMessage(
-      `Discard your pending review on ${pr.repo}#${pr.number}? All draft comments will be lost.`,
+      vscode.l10n.t("Discard your pending review on {0}#{1}? All draft comments will be lost.", pr.repo, pr.number),
       { modal: true },
-      "Discard",
+      discard,
     );
-    if (confirmed !== "Discard") {
+    if (confirmed !== discard) {
       return;
     }
     try {
@@ -180,7 +184,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // the open details panel drops its pending-review banner without waiting a poll
       void detailsSession.refreshOpenDetails();
     } catch (error) {
-      void vscode.window.showErrorMessage(`Discarding the review failed: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Discarding the review failed: {0}", toErrorMessage(error)));
     }
   }
 
@@ -218,7 +222,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const hasPendingReview = reviewController.getPendingReviewId(pr.id) !== null;
       if (postImmediately && hasPendingReview) {
-        void vscode.window.showWarningMessage("You have a pending review on this PR — submit or discard it before posting single comments.");
+        void vscode.window.showWarningMessage(vscode.l10n.t("You have a pending review on this PR — submit or discard it before posting single comments."));
         return;
       }
       // renamed LEFT documents carry the old path; GitHub threads always address the head path
@@ -235,7 +239,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // the open details panel learns about the (possibly new) pending review without waiting a poll
       void detailsSession.refreshOpenDetails();
     } catch (error) {
-      void vscode.window.showErrorMessage(`Adding the comment failed: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Adding the comment failed: {0}", toErrorMessage(error)));
     }
   }
 
@@ -249,12 +253,13 @@ export function activate(context: vscode.ExtensionContext): void {
       await mutate(await requireToken(), ref.threadId);
       await reviewController.reload(pr);
     } catch (error) {
-      void vscode.window.showErrorMessage(`${actionLabel} failed: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("{0} failed: {1}", actionLabel, toErrorMessage(error)));
     }
   }
 
   function getImagePixelated(): boolean {
-    return context.globalState.get<boolean>(IMAGE_PIXELATED_STATE_KEY, true);
+    const raw = context.globalState.get<boolean>(IMAGE_PIXELATED_STATE_KEY, true);
+    return typeof raw === "boolean" ? raw : true;
   }
 
   function setImagePixelated(value: boolean): void {
@@ -263,8 +268,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const imagePreview = new PrImagePreview(
     async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha),
-    undefined,
+    createImageViewerStrings,
     { get: getImagePixelated, set: setImagePixelated },
+    viewerLanguage,
   );
 
   async function openFileDiff(node: IFileNode, forceText = false): Promise<void> {
@@ -273,7 +279,7 @@ export function activate(context: vscode.ExtensionContext): void {
       reviewController.registerPr(pr);
       // fire-and-forget: threads appear shortly after the diff opens; failures land in the output channel
       reviewController.ensureThreadsForPr(pr).catch((error: unknown) => {
-        output.appendLine(`[${new Date().toISOString()}] Review threads load failed: ${toErrorMessage(error)}`);
+        output.appendLine(`[${new Date().toISOString()}] Review threads load failed: ${toDiagnosticMessage(error)}`);
       });
       // patches must arrive before the URIs: renames need previous_filename for the LEFT path
       const patches = await ensurePatches(pr);
@@ -294,7 +300,7 @@ export function activate(context: vscode.ExtensionContext): void {
         isEmpty: file.changeType === "DELETED",
       };
       const basename = file.path.slice(file.path.lastIndexOf("/") + 1);
-      const title = `${basename} (PR #${pr.number})`;
+      const title = vscode.l10n.t("{0} (PR #{1})", basename, pr.number);
       if (!forceText && [left, right].some((side) => !side.isEmpty && imageMimeType(side.path))) {
         const head = { ...right, repo: pr.headRepo ?? pr.repo };
         await imagePreview.open({ key: JSON.stringify([pr.id, file.path]), title, changeType: file.changeType, left, right: head });
@@ -302,7 +308,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       await vscode.commands.executeCommand("vscode.diff", toPrUri(left), toPrUri(right), title, { preview: true });
     } catch (error) {
-      void vscode.window.showErrorMessage(`Failed to open the diff: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Failed to open the diff: {0}", toErrorMessage(error)));
     }
   }
 
@@ -338,7 +344,7 @@ export function activate(context: vscode.ExtensionContext): void {
           toReviewProvider.refresh();
           reviewedProvider.refresh();
           mineProvider.refresh();
-          void vscode.window.showErrorMessage(`Updating the viewed state failed: ${toErrorMessage(error)}`);
+          void vscode.window.showErrorMessage(vscode.l10n.t("Updating the viewed state failed: {0}", toErrorMessage(error)));
         }
       })();
     }
@@ -396,7 +402,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   function manageMutedRepos(): void {
     const quickPick = vscode.window.createQuickPick<IMuteQuickPickItem>();
-    quickPick.placeholder = "Type to search GitHub repositories — pick an item to mute or unmute";
+    quickPick.placeholder = vscode.l10n.t("Type to search GitHub repositories — pick an item to mute or unmute");
     let searchResults: string[] = [];
     let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -405,22 +411,22 @@ export function activate(context: vscode.ExtensionContext): void {
       const listedEntries = new Set(mutedEntries.map((entry) => entry.trim().toLowerCase()));
       const items: IMuteQuickPickItem[] = mutedEntries.map((entry) => ({
         label: `$(mute) ${entry}`,
-        description: "muted — pick to unmute",
+        description: vscode.l10n.t("muted — pick to unmute"),
         entry,
         action: "unmute",
       }));
       for (const repo of [...knownRepos, ...searchResults]) {
         if (!listedEntries.has(repo.toLowerCase())) {
           listedEntries.add(repo.toLowerCase());
-          items.push({ label: `$(repo) ${repo}`, description: "pick to mute", entry: repo, action: "mute" });
+          items.push({ label: `$(repo) ${repo}`, description: vscode.l10n.t("pick to mute"), entry: repo, action: "mute" });
         }
       }
       const trimmedText = typedText.trim();
       const looksLikeOwner = trimmedText.length > 0 && !trimmedText.includes("/");
       if (looksLikeOwner) {
         items.push({
-          label: `$(organization) Mute everything from "${trimmedText}"`,
-          description: "mutes the whole organization",
+          label: `$(organization) ${vscode.l10n.t("Mute everything from \"{0}\"", trimmedText)}`,
+          description: vscode.l10n.t("mutes the whole organization"),
           entry: trimmedText,
           action: "mute",
           alwaysShow: true,
@@ -459,7 +465,7 @@ export function activate(context: vscode.ExtensionContext): void {
       quickPick.hide();
       if (selected.action === "mute") {
         await addMutedEntry(selected.entry);
-        void vscode.window.showInformationMessage(`Muted ${selected.entry}`);
+        void vscode.window.showInformationMessage(vscode.l10n.t("Muted {0}", selected.entry));
         return;
       }
       const config = ghccConfig();
@@ -467,7 +473,7 @@ export function activate(context: vscode.ExtensionContext): void {
         .get<string[]>("mutedRepos", [])
         .filter((entry) => entry.trim().toLowerCase() !== selected.entry.trim().toLowerCase());
       await config.update("mutedRepos", remainingEntries, vscode.ConfigurationTarget.Global);
-      void vscode.window.showInformationMessage(`Unmuted ${selected.entry}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Unmuted {0}", selected.entry));
     });
     quickPick.onDidHide(() => quickPick.dispose());
     quickPick.show();
@@ -479,16 +485,16 @@ export function activate(context: vscode.ExtensionContext): void {
     const gitApi = vscode.extensions.getExtension<IGitExtension>("vscode.git")?.exports.getAPI(1);
     const repository = gitApi?.repositories.find((candidate) => candidate.state.remotes.some(matchesRepo));
     if (!repository) {
-      void vscode.window.showErrorMessage(`No open workspace folder has a remote for ${repo}. Open the repository first.`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("No open workspace folder has a remote for {0}. Open the repository first.", repo));
       return;
     }
     try {
       const remoteName = repository.state.remotes.find(matchesRepo)?.name;
       await repository.fetch(remoteName);
       await repository.checkout(headRefName);
-      void vscode.window.showInformationMessage(`Checked out ${headRefName}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Checked out {0}", headRefName));
     } catch (error) {
-      void vscode.window.showErrorMessage(`Checkout failed: ${toErrorMessage(error)}`);
+      void vscode.window.showErrorMessage(vscode.l10n.t("Checkout failed: {0}", toErrorMessage(error)));
     }
   }
 
@@ -513,7 +519,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const registered = reviewController.getPr(prId);
       if (registered) {
         reviewController.reload(registered).catch((error: unknown) => {
-          output.appendLine(`[${new Date().toISOString()}] Review threads reload failed: ${toErrorMessage(error)}`);
+          output.appendLine(`[${new Date().toISOString()}] Review threads reload failed: ${toDiagnosticMessage(error)}`);
         });
       }
     },
@@ -540,11 +546,13 @@ export function activate(context: vscode.ExtensionContext): void {
   detailsPanel.onMessage((message) => detailsSession.handleMessage(message));
 
   function showPrToast(message: string, pr: IPullRequest): void {
-    void vscode.window.showInformationMessage(message, "Open", "Settings").then((action) => {
-      if (action === "Open") {
+    const open = vscode.l10n.t("Open");
+    const settings = vscode.l10n.t("Settings");
+    void vscode.window.showInformationMessage(message, open, settings).then((action) => {
+      if (action === open) {
         openPr(pr.url);
       }
-      if (action === "Settings") {
+      if (action === settings) {
         void vscode.commands.executeCommand("githubControlCenter.openSettings");
       }
     });
@@ -558,7 +566,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     for (const pr of newPrs) {
-      showPrToast(`New PR to review in ${pr.repo}: "${pr.title}" by ${pr.author}`, pr);
+      showPrToast(vscode.l10n.t("New PR to review in {0}: \"{1}\" by {2}", pr.repo, pr.title, pr.author), pr);
     }
   }
 
@@ -570,8 +578,8 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const pr of changedPrs) {
       const message =
         pr.reviewDecision === "APPROVED"
-          ? `Your PR was approved: "${pr.title}" (${pr.repo})`
-          : `Changes requested on: "${pr.title}" (${pr.repo})`;
+          ? vscode.l10n.t("Your PR was approved: \"{0}\" ({1})", pr.title, pr.repo)
+          : vscode.l10n.t("Changes requested on: \"{0}\" ({1})", pr.title, pr.repo);
       showPrToast(message, pr);
     }
   }
@@ -615,7 +623,7 @@ export function activate(context: vscode.ExtensionContext): void {
         (config.get("badge.countMine", false) ? visibleSnapshot.mine.length : 0) +
         (config.get("badge.countReviewed", false) ? freshlyApproved.length : 0);
       toReviewView.badge = badgeCount
-        ? { value: badgeCount, tooltip: `${badgeCount} pull requests` }
+        ? { value: badgeCount, tooltip: vscode.l10n.t("{0} pull requests", badgeCount) }
         : undefined;
       const notificationsEnabled = config.get("notifications.enabled", true);
       notifyNewPrs(visibleSnapshot.toReview, notificationsEnabled);
@@ -623,7 +631,7 @@ export function activate(context: vscode.ExtensionContext): void {
       pollScheduler.recordSuccess();
     } catch (error) {
       // poll failures stay silent: keep the last good data, no error toast every 2.5 minutes
-      output.appendLine(`[${new Date().toISOString()}] Poll failed: ${toErrorMessage(error)}`);
+      output.appendLine(`[${new Date().toISOString()}] Poll failed: ${toDiagnosticMessage(error)}`);
       pollScheduler.recordFailure(); // next cycle backs off (e.g. GitHub secondary rate limit)
     }
     // independent of the poll's own success/failure: refreshOpenDetails runs its own fetch
@@ -691,7 +699,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await addMutedEntry(node.pr.repo);
-      void vscode.window.showInformationMessage(`Muted ${node.pr.repo}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Muted {0}", node.pr.repo));
     }),
     vscode.commands.registerCommand("githubControlCenter.muteOrg", async (node: TreeNode) => {
       if (node.kind !== "pr") {
@@ -699,19 +707,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const organization = node.pr.repo.split("/")[0];
       await addMutedEntry(organization);
-      void vscode.window.showInformationMessage(`Muted everything from ${organization}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Muted everything from {0}", organization));
     }),
     vscode.commands.registerCommand("githubControlCenter.manageMutedRepos", manageMutedRepos),
     vscode.commands.registerCommand("githubControlCenter.clearBriefCache", () => {
       detailsSession.clearBriefCache();
-      void vscode.window.showInformationMessage("AI brief cache cleared.");
+      void vscode.window.showInformationMessage(vscode.l10n.t("AI brief cache cleared."));
     }),
     vscode.commands.registerCommand("githubControlCenter.openPrDetails", (pr: IPullRequest) => void detailsSession.openPrDetails(pr)),
     vscode.workspace.registerTextDocumentContentProvider(PR_URI_SCHEME, contentProvider),
     vscode.commands.registerCommand("githubControlCenter.openFileDiff", (node: IFileNode) => void openFileDiff(node)),
     vscode.commands.registerCommand("githubControlCenter.openTextDiff", (node: IFileNode) => void openFileDiff(node, true)),
-    vscode.commands.registerCommand("githubControlCenter.review.resolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, "Resolve conversation", resolveThread)),
-    vscode.commands.registerCommand("githubControlCenter.review.unresolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, "Unresolve conversation", unresolveThread)),
+    vscode.commands.registerCommand("githubControlCenter.review.resolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Resolve conversation"), resolveThread)),
+    vscode.commands.registerCommand("githubControlCenter.review.unresolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Unresolve conversation"), unresolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.addComment", (reply: vscode.CommentReply) => void handleAddComment(reply, false)),
     vscode.commands.registerCommand("githubControlCenter.review.addSingleComment", (reply: vscode.CommentReply) => void handleAddComment(reply, true)),
     vscode.commands.registerCommand("githubControlCenter.review.submit", () => void submitActiveReview()),

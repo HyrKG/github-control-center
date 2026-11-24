@@ -4,7 +4,7 @@ import { fetchReviewThreads } from "../github/github";
 import { gitHubFileRoot } from "../github/fileUrls";
 import { fromPrUri, toPrUri } from "./PrContentProvider";
 import { PR_URI_SCHEME } from "./prUri";
-import { threadLabel, toThreadAnchor } from "./reviewThreads";
+import { threadStatus, toThreadAnchor } from "./reviewThreads";
 import { syncThreads } from "./threadSync";
 import type { IPrFilePatch, IPullRequest, IReviewThread, IReviewThreadsSnapshot } from "../core/types";
 
@@ -158,7 +158,7 @@ export class ReviewController implements vscode.Disposable {
   }
 
   private applyThreadState(pr: IPullRequest, vsThread: vscode.CommentThread, thread: IReviewThread): void {
-    const isBase = fromPrUri(vsThread.uri).side === "LEFT";
+    const isBase = (vsThread.uri ? fromPrUri(vsThread.uri).side : thread.side) === "LEFT";
     const repo = isBase ? pr.repo : pr.headRepo ?? pr.repo;
     const ref = isBase ? pr.baseRefOid : pr.headRefOid;
     const baseUri = vscode.Uri.parse(gitHubFileRoot(repo, ref, "raw"));
@@ -169,11 +169,12 @@ export class ReviewController implements vscode.Disposable {
         body,
         mode: vscode.CommentMode.Preview,
         author: { name: comment.author },
-        label: comment.isPending ? "Pending" : undefined,
+        label: comment.isPending ? vscode.l10n.t("Pending") : undefined,
         timestamp: new Date(comment.createdAt),
       };
     });
-    vsThread.label = threadLabel(thread);
+    const status = threadStatus(thread);
+    vsThread.label = status === "outdated" ? vscode.l10n.t("Outdated") : status === "resolved" ? vscode.l10n.t("Resolved") : "";
     vsThread.state = thread.isResolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
     vsThread.contextValue = thread.comments.some((comment) => comment.isPending) ? "pending" : thread.isResolved ? "canUnresolve" : "canResolve";
     vsThread.collapsibleState = thread.isResolved ? vscode.CommentThreadCollapsibleState.Collapsed : vscode.CommentThreadCollapsibleState.Expanded;

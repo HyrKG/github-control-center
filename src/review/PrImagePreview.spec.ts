@@ -1,9 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInNewContext, Script } from "node:vm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { window } from "vscode";
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
 import { MAX_IMAGE_BYTES } from "../core/types";
 import { imageMimeType, PrImagePreview, renderImagePreviewHtml, type IImagePreviewSnapshot } from "./PrImagePreview";
 
-vi.mock("vscode", () => ({ window: { createWebviewPanel: vi.fn() }, ViewColumn: { Active: -1 } }));
+vi.mock("vscode", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, ViewColumn: { Active: -1 }, window: { createWebviewPanel: vi.fn() } };
+});
 
 const left = { repo: "acme/repo", sha: "base", path: "images/logo.svg", isEmpty: false };
 const right = { repo: "contributor/fork", sha: "head", path: "images/logo.svg", isEmpty: false };
@@ -79,6 +84,7 @@ describe("imageMimeType", () => {
 
 describe("PrImagePreview", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => setTestLocale());
 
   it("compares both revisions via postMessage, renders SVG only as data URI, and locks CSP to a per-render nonce", async () => {
     const panel = mockPanel();
@@ -345,5 +351,281 @@ describe("PrImagePreview", () => {
     await preview.open({ ...change, key: "pr:third", title: "large.png (PR #42)" });
     expect(panelC.webview.html).toContain('"pixelated":false');
     expect(panelC.webview.html).toMatch(/id="a-pixel"[^>]*aria-pressed="false"/);
+  });
+
+  it("compiles its inline script cleanly and executes the image load and fallback lifecycle", () => {
+    class MockDomEl {
+      className = "";
+      title = "";
+      value = "";
+      disabled = false;
+      hidden = false;
+      href = "";
+      src = "";
+      alt = "";
+      draggable = true;
+      tabIndex = 0;
+      width = 0;
+      height = 0;
+      naturalWidth = 0;
+      naturalHeight = 0;
+      complete = false;
+      dataset: Record<string, string> = {};
+      children: MockDomEl[] = [];
+      attrs = new Map<string, string>();
+      listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+      style: Record<string, unknown> = { transform: "", clipPath: "", left: "", setProperty: vi.fn() };
+      private _textContent = "";
+      private readonly classes = new Set<string>();
+      classList = {
+        add: (...names: string[]) => names.forEach((name) => this.classes.add(name)),
+        remove: (...names: string[]) => names.forEach((name) => this.classes.delete(name)),
+        contains: (name: string) => this.classes.has(name),
+        toggle: (name: string, force?: boolean) => {
+          const next = force === undefined ? !this.classes.has(name) : Boolean(force);
+          if (next) {
+            this.classes.add(name);
+          } else {
+            this.classes.delete(name);
+          }
+          return next;
+        },
+      };
+
+      constructor(public readonly tagName: string, public readonly id = "") {}
+
+      get textContent(): string {
+        return this._textContent;
+      }
+
+      set textContent(value: string) {
+        this._textContent = value;
+        this.children = [];
+      }
+
+      get firstElementChild(): MockDomEl | null {
+        return this.children[0] ?? null;
+      }
+
+      set innerHTML(_value: string) {
+        this.children = [];
+      }
+
+      append(...nodes: Array<MockDomEl | string>): void {
+        for (const node of nodes) {
+          if (node instanceof MockDomEl) {
+            this.children.push(node);
+          } else {
+            this._textContent += node;
+          }
+        }
+      }
+
+      appendChild(node: MockDomEl): MockDomEl {
+        this.children.push(node);
+        return node;
+      }
+
+      remove(): void {}
+
+      setAttribute(name: string, value: string): void {
+        this.attrs.set(name, String(value));
+      }
+
+      getAttribute(name: string): string | null {
+        return this.attrs.get(name) ?? null;
+      }
+
+      addEventListener(type: string, callback: (event: Record<string, unknown>) => void): void {
+        const list = this.listeners.get(type) ?? [];
+        list.push(callback);
+        this.listeners.set(type, list);
+      }
+
+      emit(type: string, event: Record<string, unknown> = {}): void {
+        for (const callback of this.listeners.get(type) ?? []) {
+          callback(event);
+        }
+      }
+
+      click(): void {
+        this.emit("click", {});
+      }
+
+      setPointerCapture(): void {}
+
+      releasePointerCapture(): void {}
+
+      getBoundingClientRect(): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+        return { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+      }
+
+      findAll(predicate: (el: MockDomEl) => boolean): MockDomEl[] {
+        const results: MockDomEl[] = [];
+        const walk = (node: MockDomEl): void => {
+          if (predicate(node)) {
+            results.push(node);
+          }
+          for (const child of node.children) {
+            walk(child);
+          }
+        };
+        walk(this);
+        return results;
+      }
+    }
+
+    const initialSnapshot: IImagePreviewSnapshot = {
+      revision: "rev-runtime",
+      changeType: "MODIFIED",
+      displayPath: "images/sprite.png",
+      isRenamed: false,
+      sides: [
+        {
+          side: "base",
+          label: "Base",
+          path: "images/sprite.png",
+          url: "https://github.com/acme/repo/blob/base/images/sprite.png",
+          status: "loading",
+          message: "Loading image…",
+        },
+        {
+          side: "head",
+          label: "Head",
+          path: "images/sprite.png",
+          url: "https://github.com/acme/repo/blob/head/images/sprite.png",
+          status: "loading",
+          message: "Loading image…",
+        },
+      ],
+    };
+
+    const html = renderImagePreviewHtml(initialSnapshot, "nonce-runtime");
+    const match = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
+    expect(match?.[1]).toBeTruthy();
+    const inlineScript = match![1];
+    expect(() => new Script(inlineScript)).not.toThrow();
+
+    const byId = new Map<string, MockDomEl>();
+    const makeEl = (id: string, tagName = "div", dataset: Record<string, string> = {}): MockDomEl => {
+      const el = new MockDomEl(tagName, id);
+      el.dataset = dataset;
+      byId.set(id, el);
+      return el;
+    };
+    const stageWrap = makeEl("a-stage-wrap", "main");
+    makeEl("a-pill", "span");
+    makeEl("a-path", "span");
+    const statsEl = makeEl("a-stats", "span");
+    makeEl("a-diff-modes", "div");
+    makeEl("a-side-toggle", "div");
+    makeEl("a-zoom-out", "button");
+    const zoomValBtn = makeEl("a-zoom-val", "button");
+    const zoomInBtn = makeEl("a-zoom-in", "button");
+    makeEl("a-fit", "button");
+    const pixelBtn = makeEl("a-pixel", "button");
+    pixelBtn.setAttribute("aria-pressed", "true");
+    makeEl("a-github", "a");
+
+    const modeButtons = [
+      Object.assign(new MockDomEl("button"), { dataset: { mode: "split" } }),
+      Object.assign(new MockDomEl("button"), { dataset: { mode: "swipe" } }),
+      Object.assign(new MockDomEl("button"), { dataset: { mode: "single" } }),
+    ];
+    const sideButtons = [
+      Object.assign(new MockDomEl("button"), { dataset: { side: "base" } }),
+      Object.assign(new MockDomEl("button"), { dataset: { side: "head" } }),
+    ];
+    const swatchButtons = [
+      Object.assign(new MockDomEl("button"), { dataset: { bg: "checker" } }),
+      Object.assign(new MockDomEl("button"), { dataset: { bg: "light" } }),
+    ];
+
+    const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+    const postMessage = vi.fn();
+
+    runInNewContext(inlineScript, {
+      acquireVsCodeApi: () => ({ postMessage }),
+      requestAnimationFrame: (callback: () => void) => callback(),
+      document: {
+        getElementById: (id: string) => byId.get(id) ?? null,
+        querySelectorAll: (selector: string) => {
+          if (selector === "#a-diff-modes [data-mode]") {
+            return modeButtons;
+          }
+          if (selector === "#a-side-toggle [data-side]") {
+            return sideButtons;
+          }
+          if (selector === "#a-swatches .ghcc-swatch") {
+            return swatchButtons;
+          }
+          return [];
+        },
+        addEventListener: () => undefined,
+        createElement: (tag: string) => new MockDomEl(tag),
+      },
+      window: {
+        addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
+          const list = windowListeners.get(type) ?? [];
+          list.push(callback);
+          windowListeners.set(type, list);
+        },
+      },
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({ command: "ready" });
+    expect(stageWrap.findAll((el) => el.className === "state-title")[0]?.textContent).toBe("Loading image…");
+
+    const loadedSnapshot: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,AA==", size: 128 },
+        { ...initialSnapshot.sides[1], status: "ready", dataUri: "data:image/png;base64,BB==", size: 256 },
+      ],
+    };
+    for (const listener of windowListeners.get("message") ?? []) {
+      listener({ data: { command: "state", snapshot: loadedSnapshot } });
+    }
+
+    const imgs = stageWrap.findAll((el) => el.tagName === "img");
+    expect(imgs).toHaveLength(2);
+    expect(zoomInBtn.disabled).toBe(false);
+    expect(pixelBtn.disabled).toBe(false);
+
+    imgs[0].naturalWidth = 32;
+    imgs[0].naturalHeight = 16;
+    imgs[0].emit("load", {});
+    imgs[1].naturalWidth = 32;
+    imgs[1].naturalHeight = 16;
+    imgs[1].emit("load", {});
+
+    expect(stageWrap.findAll((el) => el.className === "state-empty")).toHaveLength(0);
+    expect(statsEl.textContent).toBe("+128 B");
+    expect(stageWrap.findAll((el) => el.textContent.includes("32×16"))).toHaveLength(2);
+    expect(zoomValBtn.textContent).not.toBe("—");
+
+    pixelBtn.click();
+    expect(pixelBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(postMessage).toHaveBeenCalledWith({ command: "setPixelated", value: false });
+
+    imgs[0].emit("error", {});
+    expect(stageWrap.findAll((el) => el.className === "state-title").some((el) => el.textContent === "Could not load this image.")).toBe(true);
+  });
+
+  it("localizes preview HTML, toolbar labels, and loading text when locale bundle is set", async () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const panel = mockPanel();
+    const read = vi.fn().mockResolvedValue(svgFile);
+    const preview = new PrImagePreview(read);
+
+    await preview.open(change);
+
+    expect(panel.webview.html).toContain('<html lang="zh-cn">');
+    expect(panel.webview.html).toContain("<title>PR 图片预览</title>");
+    expect(panel.webview.html).toContain("并排");
+    expect(panel.webview.html).toContain("卷帘");
+    expect(panel.webview.html).toContain("临近插值 (P)");
+    expect(panel.webview.html).toContain("正在加载图片…");
+    expect(lastSnapshot(panel).sides.map((side) => side.label)).toEqual(["Base", "Head"]);
   });
 });

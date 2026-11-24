@@ -1,7 +1,7 @@
 {
   "name": "github-control-center",
-  "displayName": "GitHub Control Center",
-  "description": "A control center for a developer's daily GitHub activities: PRs to review, your PRs, notifications, and a full PR page inside VSCode",
+  "displayName": "%extension.name%",
+  "description": "%extension.description%",
   "version": "1.11.2",
   "publisher": "mts88",
   "icon": "images/icon.png",
@@ -38,12 +38,13 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "l10n": "./l10n",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "githubControlCenter",
-          "title": "GitHub Control Center",
+          "title": "%extension.name%",
           "icon": "images/icon-activity.svg"
         }
       ]
@@ -52,18 +53,18 @@
       "githubControlCenter": [
         {
           "id": "githubControlCenter.toReview",
-          "name": "To Review",
+          "name": "%views.toReview%",
           "icon": "$(git-pull-request)"
         },
         {
           "id": "githubControlCenter.reviewed",
-          "name": "Reviewed",
+          "name": "%views.reviewed%",
           "icon": "$(git-pull-request)",
           "when": "!config.githubControlCenter.toReview.hideReviewed"
         },
         {
           "id": "githubControlCenter.mine",
-          "name": "My PRs",
+          "name": "%views.mine%",
           "icon": "$(git-pull-request)"
         }
       ]
@@ -71,192 +72,192 @@
     "viewsWelcome": [
       {
         "view": "githubControlCenter.toReview",
-        "contents": "Sign in to GitHub to see pull requests waiting for your review.\n[Sign in to GitHub](command:githubControlCenter.signIn)",
+        "contents": "%welcome.toReview.signIn%",
         "when": "!githubControlCenter.signedIn"
       },
       {
         "view": "githubControlCenter.toReview",
-        "contents": "No pull requests waiting for your review. All clear. 🎉",
+        "contents": "%welcome.toReview.empty%",
         "when": "githubControlCenter.signedIn"
       },
       {
         "view": "githubControlCenter.reviewed",
-        "contents": "Sign in to GitHub to see the pull requests you approved.\n[Sign in to GitHub](command:githubControlCenter.signIn)",
+        "contents": "%welcome.reviewed.signIn%",
         "when": "!githubControlCenter.signedIn"
       },
       {
         "view": "githubControlCenter.reviewed",
-        "contents": "No approved pull requests. Approvals land here until new commits arrive or the pull request is merged.",
+        "contents": "%welcome.reviewed.empty%",
         "when": "githubControlCenter.signedIn"
       },
       {
         "view": "githubControlCenter.mine",
-        "contents": "Sign in to GitHub to see your open pull requests.\n[Sign in to GitHub](command:githubControlCenter.signIn)",
+        "contents": "%welcome.mine.signIn%",
         "when": "!githubControlCenter.signedIn"
       },
       {
         "view": "githubControlCenter.mine",
-        "contents": "You have no open pull requests.",
+        "contents": "%welcome.mine.empty%",
         "when": "githubControlCenter.signedIn"
       }
     ],
     "commands": [
       {
         "command": "githubControlCenter.refresh",
-        "title": "Refresh",
-        "category": "GitHub Control Center",
+        "title": "%commands.refresh%",
+        "category": "%extension.name%",
         "icon": "$(refresh)"
       },
       {
         "command": "githubControlCenter.signIn",
-        "title": "Sign in to GitHub",
-        "category": "GitHub Control Center"
+        "title": "%commands.signIn%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.openPr",
-        "title": "Open on GitHub",
-        "category": "GitHub Control Center",
+        "title": "%commands.openPr%",
+        "category": "%extension.name%",
         "icon": "$(link-external)"
       },
       {
         "command": "githubControlCenter.openPrDetails",
-        "title": "Open Pull Request Details",
-        "category": "GitHub Control Center"
+        "title": "%commands.openPrDetails%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.openFileDiff",
-        "title": "Open File Diff",
-        "category": "GitHub Control Center"
+        "title": "%commands.openFileDiff%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.openTextDiff",
-        "title": "Open Text Diff",
-        "category": "GitHub Control Center"
+        "title": "%commands.openTextDiff%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.viewFilesAsList",
-        "title": "View Files as List",
-        "category": "GitHub Control Center",
+        "title": "%commands.viewFilesAsList%",
+        "category": "%extension.name%",
         "icon": "$(list-flat)"
       },
       {
         "command": "githubControlCenter.viewFilesAsTree",
-        "title": "View Files as Tree",
-        "category": "GitHub Control Center",
+        "title": "%commands.viewFilesAsTree%",
+        "category": "%extension.name%",
         "icon": "$(list-tree)"
       },
       {
         "command": "githubControlCenter.review.addComment",
-        "title": "Add Review Comment",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.addComment%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.review.addFileComment",
-        "title": "Comment on File",
-        "category": "GitHub Control Center",
+        "title": "%commands.review.addFileComment%",
+        "category": "%extension.name%",
         "icon": "$(comment-add)"
       },
       {
         "command": "githubControlCenter.review.submit",
-        "title": "Submit Review…",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.submit%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.review.discard",
-        "title": "Discard Pending Review",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.discard%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.review.addSingleComment",
-        "title": "Add Single Comment",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.addSingleComment%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.review.resolveThread",
-        "title": "Resolve Conversation",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.resolveThread%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.review.unresolveThread",
-        "title": "Unresolve Conversation",
-        "category": "GitHub Control Center"
+        "title": "%commands.review.unresolveThread%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.openSettings",
-        "title": "Settings",
-        "category": "GitHub Control Center",
+        "title": "%commands.openSettings%",
+        "category": "%extension.name%",
         "icon": "$(gear)"
       },
       {
         "command": "githubControlCenter.copyPrUrl",
-        "title": "Copy PR URL",
-        "category": "GitHub Control Center"
+        "title": "%commands.copyPrUrl%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.copyBranchName",
-        "title": "Copy Branch Name",
-        "category": "GitHub Control Center"
+        "title": "%commands.copyBranchName%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.muteRepo",
-        "title": "Mute Repository",
-        "category": "GitHub Control Center"
+        "title": "%commands.muteRepo%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.checkoutPr",
-        "title": "Checkout Branch",
-        "category": "GitHub Control Center",
+        "title": "%commands.checkoutPr%",
+        "category": "%extension.name%",
         "icon": "$(git-branch)"
       },
       {
         "command": "githubControlCenter.muteOrg",
-        "title": "Mute Organization",
-        "category": "GitHub Control Center"
+        "title": "%commands.muteOrg%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.manageMutedRepos",
-        "title": "Manage Muted Repositories",
-        "category": "GitHub Control Center"
+        "title": "%commands.manageMutedRepos%",
+        "category": "%extension.name%"
       },
       {
         "command": "githubControlCenter.clearBriefCache",
-        "title": "Clear AI Brief Cache",
-        "category": "GitHub Control Center"
+        "title": "%commands.clearBriefCache%",
+        "category": "%extension.name%"
       }
     ],
     "configuration": [
       {
-        "title": "Badge & Notifications",
+        "title": "%settings.group.notifications%",
         "order": 1,
         "properties": {
           "githubControlCenter.badge.countToReview": {
             "type": "boolean",
             "default": true,
             "order": 1,
-            "description": "Include the To Review view (PRs waiting for your review plus reviews needing your attention) in the activity bar badge count."
+            "description": "%settings.badge.countToReview.description%"
           },
           "githubControlCenter.badge.countMine": {
             "type": "boolean",
             "default": false,
             "order": 2,
-            "description": "Include your own open PRs in the activity bar badge count."
+            "description": "%settings.badge.countMine.description%"
           },
           "githubControlCenter.badge.countReviewed": {
             "type": "boolean",
             "default": false,
             "order": 3,
-            "description": "Include the Reviewed view (PRs you approved that are still current) in the activity bar badge count. Off by default: only PRs actually waiting on you count. Has no effect while toReview.hideReviewed is on (hidden PRs are never counted)."
+            "description": "%settings.badge.countReviewed.description%"
           },
           "githubControlCenter.notifications.enabled": {
             "type": "boolean",
             "default": true,
             "order": 4,
-            "description": "Show VSCode notifications for new review requests and for review outcomes (approved / changes requested) on your own PRs."
+            "description": "%settings.notifications.enabled.description%"
           }
         }
       },
       {
-        "title": "Filtering",
+        "title": "%settings.group.filtering%",
         "order": 2,
         "properties": {
           "githubControlCenter.mutedRepos": {
@@ -266,24 +267,24 @@
             },
             "default": [],
             "order": 1,
-            "markdownDescription": "Entries to hide from both lists, the badge, and notifications: `owner/repo` mutes a repository, `owner` (or `owner/*`) mutes a whole organization. Tip: use the **GitHub Control Center: Manage Muted Repositories** command for a searchable picker."
+            "markdownDescription": "%settings.mutedRepos.description%"
           },
           "githubControlCenter.toReview.hideDrafts": {
             "type": "boolean",
             "default": false,
             "order": 2,
-            "description": "Hide draft PRs from the To Review list, the badge, and notifications."
+            "description": "%settings.toReview.hideDrafts.description%"
           },
           "githubControlCenter.toReview.hideReviewed": {
             "type": "boolean",
             "default": false,
             "order": 3,
-            "description": "Hide open PRs you already reviewed (approved, stale, or changes requested) everywhere while they wait for a re-request: the Reviewed view disappears and no reviewed rows show in To Review."
+            "description": "%settings.toReview.hideReviewed.description%"
           }
         }
       },
       {
-        "title": "Pull Requests",
+        "title": "%settings.group.pullRequests%",
         "order": 3,
         "properties": {
           "githubControlCenter.updateBranch.defaultMethod": {
@@ -293,12 +294,16 @@
               "MERGE"
             ],
             "enumDescriptions": [
-              "Update with rebase (force-pushes the PR branch)",
-              "Update with a merge commit"
+              "%settings.updateBranch.defaultMethod.REBASE.description%",
+              "%settings.updateBranch.defaultMethod.MERGE.description%"
             ],
             "default": "REBASE",
             "order": 1,
-            "description": "Method preselected for the Update branch action in the PR details panel."
+            "description": "%settings.updateBranch.defaultMethod.description%",
+            "enumItemLabels": [
+              "%settings.updateBranch.defaultMethod.REBASE.label%",
+              "%settings.updateBranch.defaultMethod.MERGE.label%"
+            ]
           },
           "githubControlCenter.files.layout": {
             "type": "string",
@@ -307,17 +312,21 @@
               "flat"
             ],
             "enumDescriptions": [
-              "Directory hierarchy with compacted single-child folders",
-              "Flat file list with the directory shown next to each name"
+              "%settings.files.layout.tree.description%",
+              "%settings.files.layout.flat.description%"
             ],
             "default": "tree",
             "order": 2,
-            "description": "How a pull request's changed files are laid out under its row."
+            "description": "%settings.files.layout.description%",
+            "enumItemLabels": [
+              "%settings.files.layout.tree.label%",
+              "%settings.files.layout.flat.label%"
+            ]
           }
         }
       },
       {
-        "title": "AI",
+        "title": "%settings.group.ai%",
         "order": 4,
         "properties": {
           "githubControlCenter.ai.backend": {
@@ -326,29 +335,29 @@
               "claude-code"
             ],
             "enumItemLabels": [
-              "Claude Code"
+              "%settings.ai.backend.claude-code.label%"
             ],
             "enumDescriptions": [
-              "The Claude Code CLI in headless mode, using your existing Claude subscription"
+              "%settings.ai.backend.claude-code.description%"
             ],
             "default": "claude-code",
             "scope": "machine",
             "order": 1,
-            "description": "Which local AI backend powers the AI features (PR brief). More backends may be added over time. Machine-scoped: a workspace cannot override it."
+            "description": "%settings.ai.backend.description%"
           },
           "githubControlCenter.ai.language": {
             "type": "string",
             "default": "English",
             "scope": "machine",
             "order": 2,
-            "description": "Language AI-generated content (the PR brief) is written in, regardless of the AI backend in use. Machine-scoped: a workspace cannot inject it into the AI system prompt."
+            "description": "%settings.ai.language.description%"
           },
           "githubControlCenter.ai.claude.command": {
             "type": "string",
             "default": "claude",
             "scope": "machine",
             "order": 3,
-            "description": "Path to the Claude Code CLI. Used only when the AI backend is Claude Code. Machine-scoped: a workspace cannot override it. AI features stay hidden when the binary is not found."
+            "description": "%settings.ai.claude.command.description%"
           },
           "githubControlCenter.ai.claude.model": {
             "type": "string",
@@ -359,21 +368,21 @@
               ""
             ],
             "enumItemLabels": [
-              "Sonnet",
-              "Haiku",
-              "Opus",
-              "CLI default"
+              "%settings.ai.claude.model.sonnet.label%",
+              "%settings.ai.claude.model.haiku.label%",
+              "%settings.ai.claude.model.opus.label%",
+              "%settings.ai.claude.model.default.label%"
             ],
             "enumDescriptions": [
-              "Fast and balanced — recommended for PR briefs",
-              "Fastest and cheapest",
-              "Most capable, slower and more expensive",
-              "Whatever the Claude CLI is configured to use"
+              "%settings.ai.claude.model.sonnet.description%",
+              "%settings.ai.claude.model.haiku.description%",
+              "%settings.ai.claude.model.opus.description%",
+              "%settings.ai.claude.model.default.description%"
             ],
             "default": "sonnet",
             "scope": "machine",
             "order": 4,
-            "description": "Model passed to `claude --model`. Used only when the AI backend is Claude Code. Machine-scoped: a workspace cannot point it at an arbitrary value."
+            "description": "%settings.ai.claude.model.description%"
           }
         }
       }
