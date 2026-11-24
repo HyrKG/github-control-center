@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { LocalizedError } from "../core/errors";
 import type {
   CiState,
   DiffSide,
@@ -283,7 +284,10 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
     body: JSON.stringify({ query, variables }),
   });
   if (!response.ok) {
-    throw new Error(`GitHub GraphQL request failed with status ${response.status}`);
+    throw new LocalizedError(
+      `GitHub GraphQL request failed with status ${response.status}`,
+      vscode.l10n.t("GitHub GraphQL request failed with status {0}", response.status),
+    );
   }
 
   const payload = (await response.json()) as IGraphQlPayload<TData>;
@@ -291,7 +295,7 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
     throw new Error(payload.errors[0].message);
   }
   if (!payload.data) {
-    throw new Error("GitHub GraphQL response has no data");
+    throw new LocalizedError("GitHub GraphQL response has no data", vscode.l10n.t("GitHub GraphQL response has no data"));
   }
   return payload.data;
 }
@@ -308,7 +312,10 @@ async function getRest(token: string, path: string, accept: string): Promise<Res
     },
   });
   if (!response.ok) {
-    throw new Error(`GitHub REST request failed with status ${response.status}`);
+    throw new LocalizedError(
+      `GitHub REST request failed with status ${response.status}`,
+      vscode.l10n.t("GitHub REST request failed with status {0}", response.status),
+    );
   }
   return response;
 }
@@ -359,7 +366,7 @@ export async function fetchPrDetails(token: string, prId: string, headRefName: s
     headRef: headRefName,
   });
   if (!data.node) {
-    throw new Error("Pull request not found");
+    throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
   }
   return toPrDetails(data.node, data.viewer.login);
 }
@@ -428,7 +435,7 @@ export async function fetchPrFiles(token: string, prId: string): Promise<IPrFile
   do {
     const data: IGraphQlFilesPage = await postGraphQl<IGraphQlFilesPage>(token, PR_FILES_QUERY, { id: prId, after });
     if (!data.node) {
-      throw new Error("Pull request not found");
+      throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
     }
     const page = data.node.files;
     files.push(
@@ -507,7 +514,7 @@ interface IGraphQlThreadsPayload {
 export async function fetchReviewThreads(token: string, prId: string): Promise<IReviewThreadsSnapshot> {
   const data = await postGraphQl<IGraphQlThreadsPayload>(token, REVIEW_THREADS_QUERY, { id: prId });
   if (!data.node) {
-    throw new Error("Pull request not found");
+    throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
   }
   const pendingReview = data.node.reviews.nodes.find((review) => review.author?.login === data.viewer.login);
   return {
@@ -523,7 +530,7 @@ export async function fetchReviewThreads(token: string, prId: string): Promise<I
       subjectType: thread.subjectType,
       comments: thread.comments.nodes.map((comment) => ({
         id: comment.id,
-        author: comment.author?.login ?? "unknown",
+        author: comment.author?.login ?? vscode.l10n.t("unknown"),
         bodyMarkdown: comment.body,
         createdAt: comment.createdAt,
         isPending: comment.state === "PENDING",
@@ -677,7 +684,7 @@ function toPullRequest(node: IGraphQlPrNode & { id: string }): IPullRequest {
     title: node.title,
     url: node.url,
     repo: node.repository.nameWithOwner,
-    author: node.author?.login ?? "unknown",
+    author: node.author?.login ?? vscode.l10n.t("unknown"),
     isDraft: node.isDraft,
     createdAt: node.createdAt,
     ciState: toCiState(node.commits.nodes[0]?.commit.statusCheckRollup?.state),
@@ -727,7 +734,7 @@ function toPrDetails(node: IGraphQlDetailsNode, viewerLogin: string): IPrDetails
     title: node.title,
     url: node.url,
     repo: node.repository.nameWithOwner,
-    author: node.author?.login ?? "unknown",
+    author: node.author?.login ?? vscode.l10n.t("unknown"),
     authorAvatarUrl: node.author?.avatarUrl ?? "",
     state: toPrState(node.state),
     isDraft: node.isDraft,
@@ -788,7 +795,7 @@ function toMergeMethods(repository: IGraphQlDetailsNode["repository"]): MergeMet
 function toTimeline(node: IGraphQlDetailsNode): IPrTimelineItem[] {
   const comments: IPrTimelineItem[] = node.comments.nodes.map((comment) => ({
     kind: "comment",
-    author: comment.author?.login ?? "unknown",
+    author: comment.author?.login ?? vscode.l10n.t("unknown"),
     avatarUrl: comment.author?.avatarUrl ?? "",
     bodyHtml: comment.bodyHTML,
     createdAt: comment.createdAt,
@@ -798,7 +805,7 @@ function toTimeline(node: IGraphQlDetailsNode): IPrTimelineItem[] {
     .filter((review) => review.state !== "COMMENTED" || review.bodyHTML !== "" || review.comments.totalCount > 0)
     .map((review) => ({
       kind: "review",
-      author: review.author?.login ?? "unknown",
+      author: review.author?.login ?? vscode.l10n.t("unknown"),
       avatarUrl: review.author?.avatarUrl ?? "",
       bodyHtml: review.bodyHTML,
       createdAt: review.createdAt,
@@ -807,7 +814,7 @@ function toTimeline(node: IGraphQlDetailsNode): IPrTimelineItem[] {
     }));
   const commits: IPrTimelineItem[] = node.historyCommits.nodes.map(({ commit }) => ({
     kind: "commit",
-    author: commit.author?.user?.login ?? commit.author?.name ?? "unknown",
+    author: commit.author?.user?.login ?? commit.author?.name ?? vscode.l10n.t("unknown"),
     avatarUrl: commit.author?.avatarUrl ?? "",
     bodyHtml: "",
     createdAt: commit.committedDate,

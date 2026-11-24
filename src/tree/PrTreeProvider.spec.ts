@@ -1,3 +1,4 @@
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import * as vscode from "vscode";
 import { PrTreeProvider, type TreeNode } from "./PrTreeProvider";
@@ -90,6 +91,29 @@ describe("PrTreeProvider", () => {
       const [prNode] = getSyncChildren(repoNode);
       return provider.getTreeItem(prNode);
     }
+
+
+    afterEach(() => setTestLocale());
+
+    it.each([
+      ["en", {}, "opened today", "CI: SUCCESS", "Your review: ✓ you approved", "MODIFIED"],
+      ["zh-cn", chineseBundle(), "今天创建", "持续集成：通过", "你的审查：✓ 你已批准", "已修改"],
+    ] as const)("localizes tree descriptions and tooltips in %s", async (locale, bundle, age, ci, review, change) => {
+      setTestLocale(locale, bundle);
+      const pr = buildPr({
+        createdAt: new Date().toISOString(),
+        ciState: "SUCCESS",
+        viewerReviewState: "APPROVED",
+        isReviewedByMe: true,
+      });
+      const item = getPrTreeItem(pr);
+      expect(item.label).toBe(pr.title);
+      expect(item.description).toContain(age);
+      expect(item.tooltip).toContain(ci);
+      expect(item.tooltip).toContain(review);
+      const [file] = await provider.getChildren({ kind: "pr", pr }) ?? [];
+      expect(provider.getTreeItem(file).tooltip).toContain(change);
+    });
 
     it("should render repo nodes expanded with the repo icon", () => {
       provider.setPrs([buildPr()]);

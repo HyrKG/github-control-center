@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { threadLabel, toThreadAnchor, toThreadPosition } from "./reviewThreads";
+import { threadStatus, toThreadAnchor, toThreadPosition } from "./reviewThreads";
 import type { IReviewThread } from "../core/types";
 
 function buildThread(overrides: Partial<IReviewThread> = {}): IReviewThread {
@@ -67,16 +67,16 @@ describe("toThreadPosition", () => {
   });
 });
 
-describe("threadLabel", () => {
+describe("threadStatus", () => {
   it("should label outdated threads", () => {
-    expect(threadLabel(buildThread({ isOutdated: true, isResolved: true }))).toBe("Outdated");
+    expect(threadStatus(buildThread({ isOutdated: true, isResolved: true }))).toBe("outdated");
   });
 
   it("should label resolved threads", () => {
-    expect(threadLabel(buildThread({ isResolved: true }))).toBe("Resolved");
+    expect(threadStatus(buildThread({ isResolved: true }))).toBe("resolved");
   });
 
   it("should return an empty label otherwise", () => {
-    expect(threadLabel(buildThread())).toBe("");
+    expect(threadStatus(buildThread())).toBeUndefined();
   });
 });

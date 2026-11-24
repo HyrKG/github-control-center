@@ -48,12 +48,12 @@ export function toThreadPosition(side: DiffSide, startLine0: number, endLine0: n
   return { startLine: startLine0 + 1, line: endLine0 + 1, side, startSide: side, subjectType: "LINE" };
 }
 
-export function threadLabel(thread: IReviewThread): string {
+export function threadStatus(thread: IReviewThread): "outdated" | "resolved" | undefined {
   if (thread.isOutdated) {
-    return "Outdated";
+    return "outdated";
   }
   if (thread.isResolved) {
-    return "Resolved";
+    return "resolved";
   }
-  return "";
+  return undefined;
 }

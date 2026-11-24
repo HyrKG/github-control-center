@@ -42,20 +42,16 @@ const REVIEW_GLYPHS: Record<string, string> = {
   REVIEW_REQUIRED: "●",
 };
 
-const VIEWER_REVIEW_LABELS: Record<string, string> = {
-  APPROVED: "✓ you approved",
-  DISMISSED: "● review stale",
-  CHANGES_REQUESTED: "↻ you requested changes",
-  COMMENTED: "💬 you commented",
-};
-
 function toViewerReviewLabel(pr: IPullRequest): string {
   // an approval invalidated by newer commits reads as stale, never as a current approval
-  if (pr.viewerReviewState === "APPROVED" && pr.isViewerApprovalStale) {
-    return VIEWER_REVIEW_LABELS.DISMISSED;
+  const state = pr.isViewerApprovalStale && pr.viewerReviewState === "APPROVED" ? "DISMISSED" : pr.viewerReviewState;
+  switch (state) {
+    case "APPROVED": return vscode.l10n.t("✓ you approved");
+    case "DISMISSED": return vscode.l10n.t("● review stale");
+    case "CHANGES_REQUESTED": return vscode.l10n.t("↻ you requested changes");
+    case "COMMENTED": return vscode.l10n.t("💬 you commented");
+    default: return vscode.l10n.t("reviewed");
   }
-  // total mapping: unknown states (e.g. PENDING) and null fall back to a generic label
-  return (pr.viewerReviewState && VIEWER_REVIEW_LABELS[pr.viewerReviewState]) || "reviewed";
 }
 
 const CI_ICONS: Record<CiState, vscode.ThemeIcon> = {
@@ -109,7 +105,7 @@ export class PrTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       // expansion is user-initiated: unlike the silent poll, failures render in the tree
       return this.loadFiles(element.pr).then(
         (files) => this.toFileChildren(element.pr, files),
-        (error: unknown) => [{ kind: "message" as const, text: `Failed to load files: ${toErrorMessage(error)}` }],
+        (error: unknown) => [{ kind: "message" as const, text: vscode.l10n.t("Failed to load files: {0}", toErrorMessage(error)) }],
       );
     }
     if (element.kind === "folder") {
@@ -197,11 +193,34 @@ function toPrTreeItem(pr: IPullRequest): vscode.TreeItem {
   const viewerReviewLabel = pr.isReviewedByMe ? toViewerReviewLabel(pr) : undefined;
   item.description = `${pr.author} · ${formatAge(pr.createdAt)}${viewerReviewLabel ? ` · ${viewerReviewLabel}` : ""}`;
   item.iconPath = pr.isDraft ? new vscode.ThemeIcon("git-pull-request-draft") : CI_ICONS[pr.ciState];
-  item.tooltip = `${pr.repo}\n${pr.title}\nby ${pr.author}${pr.isDraft ? " · draft" : ""}\nCI: ${pr.ciState}${pr.reviewDecision ? `\nReview: ${pr.reviewDecision}` : ""}${viewerReviewLabel ? `\nYour review: ${viewerReviewLabel}` : ""}`;
+  const ciStates: Record<CiState, string> = {
+    SUCCESS: vscode.l10n.t("SUCCESS"),
+    FAILURE: vscode.l10n.t("FAILURE"),
+    PENDING: vscode.l10n.t("PENDING"),
+    NONE: vscode.l10n.t("NONE"),
+  };
+  const reviewDecisions: Record<string, string> = {
+    APPROVED: vscode.l10n.t("APPROVED"),
+    CHANGES_REQUESTED: vscode.l10n.t("CHANGES_REQUESTED"),
+    REVIEW_REQUIRED: vscode.l10n.t("REVIEW_REQUIRED"),
+  };
+  const tooltip = [
+    pr.repo,
+    pr.title,
+    pr.isDraft ? vscode.l10n.t("by {0} · draft", pr.author) : vscode.l10n.t("by {0}", pr.author),
+    vscode.l10n.t("CI: {0}", ciStates[pr.ciState]),
+  ];
+  if (pr.reviewDecision) {
+    tooltip.push(vscode.l10n.t("Review: {0}", reviewDecisions[pr.reviewDecision] ?? pr.reviewDecision));
+  }
+  if (viewerReviewLabel) {
+    tooltip.push(vscode.l10n.t("Your review: {0}", viewerReviewLabel));
+  }
+  item.tooltip = tooltip.join("\n");
   item.contextValue = "pr";
   item.command = {
     command: "githubControlCenter.openPrDetails",
-    title: "Open Pull Request Details",
+    title: vscode.l10n.t("Open Pull Request Details"),
     arguments: [pr],
   };
   return item;
@@ -215,12 +234,20 @@ function toFileTreeItem(node: IFileNode, layout: FilesLayout): vscode.TreeItem {
   // in the tree layout the directory is implicit in the hierarchy
   item.description = layout === "tree" || separatorIndex === -1 ? "" : file.path.slice(0, separatorIndex);
   item.iconPath = FILE_CHANGE_ICONS[file.changeType];
-  item.tooltip = `${file.path}\n+${file.additions} −${file.deletions} · ${file.changeType}`;
+  const changeTypes: Record<FileChangeType, string> = {
+    ADDED: vscode.l10n.t("ADDED"),
+    MODIFIED: vscode.l10n.t("MODIFIED"),
+    CHANGED: vscode.l10n.t("CHANGED"),
+    DELETED: vscode.l10n.t("DELETED"),
+    RENAMED: vscode.l10n.t("RENAMED"),
+    COPIED: vscode.l10n.t("COPIED"),
+  };
+  item.tooltip = `${file.path}\n${vscode.l10n.t("+{0} −{1} · {2}", file.additions, file.deletions, changeTypes[file.changeType])}`;
   item.contextValue = "prFile";
   item.checkboxState = file.viewedState === "VIEWED" ? vscode.TreeItemCheckboxState.Checked : vscode.TreeItemCheckboxState.Unchecked;
   item.command = {
     command: "githubControlCenter.openFileDiff",
-    title: "Open File Diff",
+    title: vscode.l10n.t("Open File Diff"),
     arguments: [node],
   };
   return item;
@@ -229,10 +256,10 @@ function toFileTreeItem(node: IFileNode, layout: FilesLayout): vscode.TreeItem {
 function formatAge(createdAt: string): string {
   const ageInDays = Math.floor((Date.now() - new Date(createdAt).getTime()) / 86_400_000);
   if (ageInDays <= 0) {
-    return "opened today";
+    return vscode.l10n.t("opened today");
   }
   if (ageInDays === 1) {
-    return "opened yesterday";
+    return vscode.l10n.t("opened yesterday");
   }
-  return `opened ${ageInDays} days ago`;
+  return vscode.l10n.t("opened {0} days ago", ageInDays);
 }

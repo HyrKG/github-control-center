@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createPrDetailsStrings, prDetailsLanguage } from "./PrDetailsStrings";
 import { renderMessageHtml, renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails, MergeMethod, UpdateBranchMethod } from "../core/types";
 
@@ -13,7 +14,7 @@ export type IPanelMessage =
   | { command: "composerState"; hasText: boolean };
 
 export function formatPrTabTitle(pr: { repo: string; title: string; number: number }): string {
-  return `${pr.repo} · ${pr.title} #${pr.number}`;
+  return vscode.l10n.t("{0} · {1} #{2}", pr.repo, pr.title, pr.number);
 }
 
 export class PrDetailsPanel {
@@ -27,11 +28,11 @@ export class PrDetailsPanel {
   }
 
   showLoading(title: string): void {
-    this.render(title, renderMessageHtml("Loading pull request details…", crypto.randomUUID()));
+    this.render(title, renderMessageHtml(vscode.l10n.t("Loading pull request details…"), crypto.randomUUID(), prDetailsLanguage()));
   }
 
   showMessage(title: string, message: string): void {
-    this.render(title, renderMessageHtml(message, crypto.randomUUID()));
+    this.render(title, renderMessageHtml(message, crypto.randomUUID(), prDetailsLanguage()));
   }
 
   showDetails(details: IPrDetails, brief?: IBriefState): void {
@@ -64,7 +65,7 @@ export class PrDetailsPanel {
       .getConfiguration("githubControlCenter")
       .get<UpdateBranchMethod>("updateBranch.defaultMethod", "REBASE");
     panel.title = formatPrTabTitle(details);
-    panel.webview.html = renderPrDetailsHtml(details, crypto.randomUUID(), Date.now(), mermaidScriptUri, defaultUpdateMethod, brief);
+    panel.webview.html = renderPrDetailsHtml(details, crypto.randomUUID(), Date.now(), createPrDetailsStrings(), mermaidScriptUri, defaultUpdateMethod, brief);
   }
 
   private render(title: string, html: string): void {

@@ -3,7 +3,7 @@ import { commentableRanges } from "./diffPatch";
 import { fetchReviewThreads } from "../github/github";
 import { fromPrUri, toPrUri } from "./PrContentProvider";
 import { PR_URI_SCHEME } from "./prUri";
-import { threadLabel, toThreadAnchor } from "./reviewThreads";
+import { threadStatus, toThreadAnchor } from "./reviewThreads";
 import { syncThreads } from "./threadSync";
 import type { IPrFilePatch, IPullRequest, IReviewThread, IReviewThreadsSnapshot } from "../core/types";
 
@@ -161,10 +161,11 @@ export class ReviewController implements vscode.Disposable {
       body: new vscode.MarkdownString(comment.bodyMarkdown),
       mode: vscode.CommentMode.Preview,
       author: { name: comment.author },
-      label: comment.isPending ? "Pending" : undefined,
+      label: comment.isPending ? vscode.l10n.t("Pending") : undefined,
       timestamp: new Date(comment.createdAt),
     }));
-    vsThread.label = threadLabel(thread);
+    const status = threadStatus(thread);
+    vsThread.label = status === "outdated" ? vscode.l10n.t("Outdated") : status === "resolved" ? vscode.l10n.t("Resolved") : "";
     vsThread.state = thread.isResolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
     vsThread.contextValue = thread.comments.some((comment) => comment.isPending) ? "pending" : thread.isResolved ? "canUnresolve" : "canResolve";
     vsThread.collapsibleState = thread.isResolved ? vscode.CommentThreadCollapsibleState.Collapsed : vscode.CommentThreadCollapsibleState.Expanded;
