@@ -994,7 +994,7 @@ export function renderImagePreviewHtml(
         entry.dataUri = undefined;
         entry.message = STRINGS.loadFailed;
         delete state.dims[targetSide.side];
-        renderStage({ forceRebuild: true, preserveTransform: !ctrl.state.isFitted });
+        renderStage({ forceRebuild: true });
       }
 
       function applyFailedOverrides(snapshot) {
@@ -1018,7 +1018,7 @@ export function renderImagePreviewHtml(
         };
       }
 
-      function onImageReady(preserveTransform) {
+      function onImageReady() {
         state.snapshot.sides.forEach((side) => {
           const paneRef = state.splitPanes[side.side];
           if (paneRef?.headMeta) {
@@ -1026,7 +1026,7 @@ export function renderImagePreviewHtml(
           }
         });
         updateMetaDisplays();
-        if ((preserveTransform && ctrl.state.hasFitted) || !ctrl.state.isFitted) {
+        if (!ctrl.state.isFitted) {
           applyTransform(ctrl.state);
         } else {
           requestAnimationFrame(() => ctrl.refitIfFitted());
@@ -1063,7 +1063,7 @@ export function renderImagePreviewHtml(
         return { head, dot, name, meta, extLink };
       }
 
-      function populateSplitPaneBody(paneRef, side, preserveTransform) {
+      function populateSplitPaneBody(paneRef, side) {
         paneRef.body.textContent = "";
         paneRef.statusKey = sideStatusKey(side);
         paneRef.img = null;
@@ -1079,7 +1079,7 @@ export function renderImagePreviewHtml(
           const vp = document.createElement("div");
           vp.className = "canvas-vp ghcc-surface" + (state.pixelated ? " pixelated" : "");
           vp.dataset.bg = state.bg;
-          const img = createCanvasImg(side, () => onImageReady(preserveTransform), () => onImageError(side));
+          const img = createCanvasImg(side, onImageReady, () => onImageError(side));
           vp.appendChild(img);
           paneRef.body.appendChild(vp);
           paneRef.vp = vp;
@@ -1104,7 +1104,7 @@ export function renderImagePreviewHtml(
         });
       }
 
-      function syncSingleToggleView(preserveTransform) {
+      function syncSingleToggleView() {
         const sv = state.singleView;
         if (!sv) {
           return;
@@ -1120,7 +1120,7 @@ export function renderImagePreviewHtml(
             delete sv.imgs[side.side];
           }
           if (side.status === "ready" && side.dataUri) {
-            const img = createCanvasImg(side, () => onImageReady(preserveTransform), () => onImageError(side));
+            const img = createCanvasImg(side, onImageReady, () => onImageError(side));
             img.hidden = side.side !== state.activeSide;
             sv.vp.appendChild(img);
             sv.imgs[side.side] = img;
@@ -1139,7 +1139,7 @@ export function renderImagePreviewHtml(
           sv.vp.hidden = false;
           sv.fallbackHost.hidden = true;
           sv.fallbackHost.textContent = "";
-          if (ctrl.state.hasFitted || !ctrl.state.isFitted) {
+          if (!ctrl.state.isFitted) {
             applyTransform(ctrl.state);
           } else if (state.dims[active.side]) {
             requestAnimationFrame(() => ctrl.refitIfFitted());
@@ -1155,7 +1155,6 @@ export function renderImagePreviewHtml(
 
       function renderStage(options) {
         const forceRebuild = Boolean(options?.forceRebuild);
-        const preserveTransform = Boolean(options?.preserveTransform);
         const ready = readySides();
 
         if (!bothReady() && state.mode === "swipe") {
@@ -1178,7 +1177,7 @@ export function renderImagePreviewHtml(
             const ref = state.splitPanes[side.side];
             if (ref && ref.statusKey !== sideStatusKey(side)) {
               changed = true;
-              populateSplitPaneBody(ref, side, true);
+              populateSplitPaneBody(ref, side);
             }
           });
           if (changed) {
@@ -1193,7 +1192,7 @@ export function renderImagePreviewHtml(
 
         // Incremental update in Single (Toggle) mode: zero-flicker swap preserving zoom & pan
         if (!forceRebuild && targetLayout === "single" && state.layoutKind === "single" && state.singleView) {
-          syncSingleToggleView(true);
+          syncSingleToggleView();
           return;
         }
 
@@ -1230,12 +1229,12 @@ export function renderImagePreviewHtml(
 
           const baseLayer = document.createElement("div");
           baseLayer.className = "swipe-layer";
-          const baseImg = createCanvasImg(base, () => onImageReady(preserveTransform), () => onImageError(base));
+          const baseImg = createCanvasImg(base, onImageReady, () => onImageError(base));
           baseLayer.appendChild(baseImg);
 
           const headLayer = document.createElement("div");
           headLayer.className = "swipe-layer";
-          const headImg = createCanvasImg(head, () => onImageReady(preserveTransform), () => onImageError(head));
+          const headImg = createCanvasImg(head, onImageReady, () => onImageError(head));
           headLayer.appendChild(headImg);
 
           const badgeL = document.createElement("div");
@@ -1354,7 +1353,7 @@ export function renderImagePreviewHtml(
             imgs: Object.create(null),
             sideKeys: Object.create(null),
           };
-          syncSingleToggleView(preserveTransform);
+          syncSingleToggleView();
           if (!ctrl.state.isFitted) {
             applyTransform(ctrl.state);
           } else {
@@ -1386,7 +1385,7 @@ export function renderImagePreviewHtml(
 
           const paneRef = { headMeta, headLink, body, statusKey: "", vp: null, img: null };
           state.splitPanes[side.side] = paneRef;
-          populateSplitPaneBody(paneRef, side, preserveTransform);
+          populateSplitPaneBody(paneRef, side);
         });
 
         stageWrap.appendChild(grid);
@@ -1409,7 +1408,7 @@ export function renderImagePreviewHtml(
             return;
           }
           state.mode = nextMode;
-          renderStage({ forceRebuild: true, preserveTransform: !ctrl.state.isFitted });
+          renderStage({ forceRebuild: true });
         });
       });
 
@@ -1418,7 +1417,7 @@ export function renderImagePreviewHtml(
           return;
         }
         state.activeSide = nextSide;
-        syncSingleToggleView(true);
+        syncSingleToggleView();
       }
 
       sideButtons.forEach((btn) => {
@@ -1506,7 +1505,7 @@ export function renderImagePreviewHtml(
           return;
         }
         state.snapshot = applyFailedOverrides(event.data.snapshot);
-        renderStage({ preserveTransform: !ctrl.state.isFitted });
+        renderStage();
       });
 
       renderStage();

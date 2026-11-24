@@ -906,6 +906,56 @@ describe("PrImagePreview", () => {
     const emptyVm = bootVm(emptySnapshot);
     const actionLink = emptyVm.stageWrap.findAll((el) => el.className === "state-action")[0];
     expect(actionLink?.href).toBe("https://github.com/acme/repo/blob/base/images/huge.png");
+
+    // 6. Fitted state refits when larger second side arrives asynchronously and on Toggle side switch
+    const refitVm = bootVm(initialSnapshot);
+    const baseOnlyReady: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,SMALL_BASE=", size: 64 },
+        { ...initialSnapshot.sides[1], status: "loading", message: "Loading image…" },
+      ],
+    };
+    refitVm.emitWindow("message", { data: { command: "state", snapshot: baseOnlyReady } });
+    const baseSmallImg = refitVm.stageWrap.findAll((el) => el.tagName === "img")[0];
+    baseSmallImg.naturalWidth = 32;
+    baseSmallImg.naturalHeight = 16;
+    baseSmallImg.emit("load", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(refitVm.zoomValBtn.textContent).toBe("700%");
+    expect(baseSmallImg.style.transform).toContain("scale(7)");
+
+    const bothDifferentSizes: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,SMALL_BASE=", size: 64 },
+        { ...initialSnapshot.sides[1], status: "ready", dataUri: "data:image/png;base64,LARGE_HEAD=", size: 1024 },
+      ],
+    };
+    refitVm.emitWindow("message", { data: { command: "state", snapshot: bothDifferentSizes } });
+    const refitImgs = refitVm.stageWrap.findAll((el) => el.tagName === "img");
+    expect(refitImgs).toHaveLength(2);
+    refitImgs[1].naturalWidth = 400;
+    refitImgs[1].naturalHeight = 300;
+    refitImgs[1].emit("load", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(refitVm.zoomValBtn.textContent).toBe("100%");
+    expect(refitImgs[0].style.transform).toContain("scale(1)");
+    expect(refitImgs[1].style.transform).toContain("scale(1)");
+
+    // Toggle mode while still fitted refits when switching between Head (400×300) and Base (32×16)
+    refitVm.modeButtons[2].click();
+    expect(refitVm.zoomValBtn.textContent).toBe("100%");
+    refitVm.sideButtons[0].click();
+    expect(refitVm.zoomValBtn.textContent).toBe("700%");
+    refitVm.sideButtons[1].click();
+    expect(refitVm.zoomValBtn.textContent).toBe("100%");
+
+    // Manual zoom in Toggle mode disables auto-fit and preserves transform across side switches
+    refitVm.zoomInBtn.click();
+    expect(refitVm.zoomValBtn.textContent).toBe("125%");
+    refitVm.sideButtons[0].click();
+    expect(refitVm.zoomValBtn.textContent).toBe("125%");
   });
 
   it("localizes preview HTML, toolbar labels, and loading text when locale bundle is set", async () => {
