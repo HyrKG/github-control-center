@@ -379,11 +379,10 @@ const PREVIEW_STYLE = `
     min-height: 0;
     position: relative;
     overflow: hidden;
-    cursor: zoom-in;
+    cursor: grab;
     user-select: none;
     touch-action: none;
   }
-  .canvas-vp.pannable { cursor: grab; }
   .canvas-vp.panning { cursor: grabbing; }
 
   .swipe-stage {
@@ -391,11 +390,10 @@ const PREVIEW_STYLE = `
     min-height: 0;
     position: relative;
     overflow: hidden;
-    cursor: zoom-in;
+    cursor: grab;
     user-select: none;
     touch-action: none;
   }
-  .swipe-stage.pannable { cursor: grab; }
   .swipe-stage.panning { cursor: grabbing; }
   .swipe-layer {
     position: absolute;
@@ -724,13 +722,13 @@ export function renderImagePreviewHtml(
       }
 
       function applyTransform(st) {
-        const tf = "translate(" + st.tx + "px, " + st.ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
+        const tx = state.pixelated ? Math.round(st.tx) : st.tx;
+        const ty = state.pixelated ? Math.round(st.ty) : st.ty;
+        const tf = "translate(" + tx + "px, " + ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
         state.imgs.forEach((img) => {
           img.style.transform = tf;
           img.style.setProperty("--ghcc-scale", String(st.scale));
         });
-        const pannable = ctrl.isPannable();
-        state.viewports.forEach((vp) => vp.classList.toggle("pannable", pannable));
         zoomValBtn.textContent = isActiveCanvasReady() ? Math.round(st.scale * 100) + "%" : "—";
       }
 

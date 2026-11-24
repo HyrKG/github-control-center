@@ -924,6 +924,11 @@ describe("inline image lightbox", () => {
     expect(html).toContain(".ghcc-lightbox .ghcc-swatch");
     expect(html).toContain(".ghcc-lightbox .lb-nav");
     expect(html).toContain('!button.closest?.(".ghcc-lightbox")');
+    expect(html).toContain("Nearest-neighbor (P)");
+    expect(html).toContain("cursor: grab;");
+    expect(html).toContain("cursor: pointer;");
+    expect(html).not.toContain("cursor: zoom-in");
+    expect(html).not.toContain("crisp-edges");
   });
 
   it("skips small badges, intercepts plain click on linked images, keeps modifier clicks, and guards lightbox close", () => {
@@ -1166,13 +1171,11 @@ describe("inline image lightbox", () => {
     expect(lbCounter.textContent).toBe("1 / 2");
     expect(lbGithub.href).toBe("https://github.com/acme/repo/blob/main/shot.png");
 
-    // Clicking inside the image bounds (e.g. single click or double-click) must NOT close the lightbox
+    // Clicking inside the image bounds must NOT close the lightbox
     lbStage.emit("click", { target: lbStage, clientX: 400, clientY: 300 });
     expect(lbEl.classList.contains("open")).toBe(true);
 
-    // Zoom to 100% (1200x800 > 1000x800 viewport => pannable), drag and release outside the image: must NOT close
-    lbZoomVal.emit("click", {});
-    expect(lbZoomVal.textContent).toBe("100%");
+    // Even in fitted state, dragging and releasing outside the image must pan without closing the lightbox
     lbStage.emit("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
     lbStage.emit("pointermove", { clientX: 450, clientY: 340 });
     lbStage.emit("pointerup", {});

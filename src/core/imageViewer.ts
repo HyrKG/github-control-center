@@ -53,7 +53,7 @@ export const DEFAULT_IMAGE_VIEWER_STRINGS: IImageViewerStrings = {
   zoomIn: "Zoom in (+)",
   zoomToggle: "Toggle Fit / 1:1 (0 / 1)",
   zoomFit: "Fit to view (0)",
-  pixelCrisp: "Pixelated rendering (P)",
+  pixelCrisp: "Nearest-neighbor (P)",
   openGitHub: "Open on GitHub",
   close: "Close (Esc)",
   previous: "Previous",
@@ -365,12 +365,10 @@ export const IMAGE_VIEWER_SHARED_CSS = `
     max-height: none;
     display: block;
     box-shadow: 0 0 0 calc(1px / var(--ghcc-scale, 1)) rgba(128, 128, 128, 0.28);
-    will-change: transform;
     pointer-events: none;
   }
   .pixelated .canvas-img {
     image-rendering: pixelated;
-    image-rendering: crisp-edges;
   }
 `;
 
@@ -484,15 +482,6 @@ export const IMAGE_VIEWER_CONTROLLER_SCRIPT = `
       }
     }
 
-    function isPannable() {
-      const rect = getViewportRect();
-      const ref = getRefSize();
-      if (!rect || !ref) {
-        return false;
-      }
-      return ref.w * state.scale > rect.width - 8 || ref.h * state.scale > rect.height - 8;
-    }
-
     function consumeJustDragged() {
       if (!state.justDragged) {
         return false;
@@ -508,18 +497,8 @@ export const IMAGE_VIEWER_CONTROLLER_SCRIPT = `
         setZoom(state.scale * factor, e.clientX, e.clientY, el.getBoundingClientRect());
       }, { passive: false });
 
-      el.addEventListener("dblclick", (e) => {
-        if (e.target?.closest?.(".swipe-divider, .lb-nav, .state-empty")) {
-          return;
-        }
-        toggleFitOneToOne(e.clientX, e.clientY, el.getBoundingClientRect());
-      });
-
       el.addEventListener("pointerdown", (e) => {
         if (e.button !== 0 || e.target?.closest?.(".swipe-divider, .lb-nav, .state-empty")) {
-          return;
-        }
-        if (!isPannable()) {
           return;
         }
         state.dragging = true;
@@ -564,6 +543,6 @@ export const IMAGE_VIEWER_CONTROLLER_SCRIPT = `
       el.addEventListener("pointercancel", endDrag);
     }
 
-    return { state, fit, refitIfFitted, setZoom, stepZoom, toggleFitOneToOne, isPannable, consumeJustDragged, bindViewport };
+    return { state, fit, refitIfFitted, setZoom, stepZoom, toggleFitOneToOne, consumeJustDragged, bindViewport };
   }
 `;

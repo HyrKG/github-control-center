@@ -299,5 +299,9 @@ describe("PrImagePreview", () => {
     expect(html.match(/<\/script>/g)).toHaveLength(1);
     expect(html).toContain("\\u003c/script>");
     expect(html).not.toContain('onerror="alert(1)"');
+    expect(html).toContain("Nearest-neighbor (P)");
+    expect(html).toContain("cursor: grab;");
+    expect(html).not.toContain("cursor: zoom-in");
+    expect(html).not.toContain("crisp-edges");
   });
 });

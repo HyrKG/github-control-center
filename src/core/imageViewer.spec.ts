@@ -34,7 +34,6 @@ interface IControllerExports {
     setZoom: (nextScale: number, clientX?: number, clientY?: number) => void;
     stepZoom: (dir: number, clientX?: number, clientY?: number) => void;
     toggleFitOneToOne: (clientX?: number, clientY?: number) => void;
-    isPannable: () => boolean;
     consumeJustDragged: () => boolean;
     bindViewport: (el: unknown) => void;
   };
@@ -90,6 +89,13 @@ describe("imageViewer helpers", () => {
     expect(IMAGE_VIEWER_SHARED_CSS).toContain("--ghcc-canvas-bg");
     expect(IMAGE_VIEWER_SHARED_CSS).toContain("--ghcc-checker-a");
     expect(IMAGE_VIEWER_SHARED_CSS).not.toMatch(/--vscode-[a-zA-Z0-9-]+\s*:/);
+  });
+
+  it("uses true nearest-neighbor pixelated rendering without crisp-edges override or will-change", () => {
+    expect(IMAGE_VIEWER_SHARED_CSS).toContain("image-rendering: pixelated;");
+    expect(IMAGE_VIEWER_SHARED_CSS).not.toContain("crisp-edges");
+    expect(IMAGE_VIEWER_SHARED_CSS).not.toContain("will-change");
+    expect(DEFAULT_IMAGE_VIEWER_STRINGS.pixelCrisp).toBe("Nearest-neighbor (P)");
   });
 });
 
@@ -172,5 +178,41 @@ describe("imageViewer transform controller script", () => {
     listeners.get("pointerup")?.({});
     expect(ctrl.consumeJustDragged()).toBe(true);
     expect(ctrl.consumeJustDragged()).toBe(false);
+  });
+
+  it("allows dragging in fitted state, ignores dblclick zoom, and zooms via wheel", () => {
+    const { createImageTransformController } = loadControllerScript();
+    const listeners = new Map<string, (e: Record<string, unknown>) => void>();
+    const el = {
+      addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => listeners.set(event, fn),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+      setPointerCapture: vi.fn(),
+      classList: { add: vi.fn(), remove: vi.fn() },
+    };
+    const ctrl = createImageTransformController({
+      getViewportRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+      getRefSize: () => ({ w: 400, h: 300 }),
+      onUpdate: vi.fn(),
+    });
+    ctrl.fit();
+    ctrl.bindViewport(el);
+
+    // No dblclick handler is attached on the canvas viewport
+    expect(listeners.has("dblclick")).toBe(false);
+    const scaleBefore = ctrl.state.scale;
+
+    // Image smaller than viewport (100% fitted) can still be dragged freely
+    listeners.get("pointerdown")?.({ button: 0, clientX: 100, clientY: 100, pointerId: 3 });
+    listeners.get("pointermove")?.({ clientX: 140, clientY: 125 });
+    listeners.get("pointerup")?.({});
+    expect(ctrl.state.tx).toBe(40);
+    expect(ctrl.state.ty).toBe(25);
+    expect(ctrl.state.scale).toBe(scaleBefore);
+
+    // Wheel zooms around cursor
+    const preventDefault = vi.fn();
+    listeners.get("wheel")?.({ deltaY: -120, clientX: 450, clientY: 320, preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(ctrl.state.scale).toBeGreaterThan(scaleBefore);
   });
 });

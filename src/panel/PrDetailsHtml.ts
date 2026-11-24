@@ -349,7 +349,7 @@ const BASE_STYLE = `
     max-height: 460px;
     width: auto;
     height: auto;
-    cursor: zoom-in;
+    cursor: pointer;
   }
   .ghcc-expand-hint {
     position: absolute;
@@ -441,11 +441,10 @@ const BASE_STYLE = `
     min-height: 0;
     position: relative;
     overflow: hidden;
-    cursor: zoom-in;
+    cursor: grab;
     user-select: none;
     touch-action: none;
   }
-  .lb-stage.pannable { cursor: grab; }
   .lb-stage.panning { cursor: grabbing; }
   .ghcc-lightbox .ghcc-btn {
     height: 26px;
@@ -1299,9 +1298,10 @@ export function renderPrDetailsHtml(
           return nw && nh ? { w: nw, h: nh } : null;
         },
         onUpdate: (st) => {
-          lbImg.style.transform = "translate(" + st.tx + "px, " + st.ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
+          const tx = lbState.pixelated ? Math.round(st.tx) : st.tx;
+          const ty = lbState.pixelated ? Math.round(st.ty) : st.ty;
+          lbImg.style.transform = "translate(" + tx + "px, " + ty + "px) translate(-50%, -50%) scale(" + st.scale + ")";
           lbImg.style.setProperty("--ghcc-scale", String(st.scale));
-          lbStage.classList.toggle("pannable", lbCtrl.isPannable());
           if (lbZoomVal) {
             lbZoomVal.textContent = Math.round(st.scale * 100) + "%";
           }
