@@ -491,6 +491,14 @@ const BASE_STYLE = `
   .ghcc-lightbox .lb-nav.prev { left: 14px; }
   .ghcc-lightbox .lb-nav.next { right: 14px; }
   .ghcc-lightbox .lb-nav svg { width: 18px; height: 18px; }
+  .ghcc-lightbox .lb-error {
+    padding: 12px 18px;
+    border-radius: 6px;
+    border: 1px solid var(--gr-red);
+    background: var(--ghcc-surface-elevated);
+    color: var(--vscode-foreground);
+    font-size: 13px;
+  }
 `;
 
 // Escape the translated sentence before inserting markup with already-escaped values.
@@ -935,10 +943,17 @@ function renderSidebar(details: IPrDetails, strings: IPrDetailsStrings): string 
   </aside>`;
 }
 
+function safeCodePoint(codePoint: number): string {
+  if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+    return "\uFFFD";
+  }
+  return String.fromCodePoint(codePoint);
+}
+
 export function decodeHtmlEntities(value: string): string {
   return value
-    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/gi, (_match, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_match, code: string) => safeCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/gi, (_match, hex: string) => safeCodePoint(parseInt(hex, 16)))
     .replaceAll("&quot;", '"')
     .replaceAll("&apos;", "'")
     .replaceAll("&lt;", "<")
@@ -1125,6 +1140,7 @@ export function renderPrDetailsHtml(
     <div class="lb-stage ghcc-surface${pixelated ? " pixelated" : ""}" id="lb-stage" data-bg="checker">
       <button class="lb-nav prev" id="lb-prev" type="button" aria-label="${escapeHtml(imageStrings.previous)}" hidden>${IMAGE_VIEWER_ICONS.prev}</button>
       <img class="canvas-img" id="lb-img" alt="">
+      <div class="lb-error" id="lb-error" hidden></div>
       <button class="lb-nav next" id="lb-next" type="button" aria-label="${escapeHtml(imageStrings.next)}" hidden>${IMAGE_VIEWER_ICONS.next}</button>
     </div>
   </div>`;
@@ -1187,9 +1203,11 @@ export function renderPrDetailsHtml(
       return prUrl;
     }
 
+    const layoutEl = document.querySelector(".layout");
     const lbEl = document.getElementById("ghcc-lightbox");
     const lbStage = document.getElementById("lb-stage");
     const lbImg = document.getElementById("lb-img");
+    const lbError = document.getElementById("lb-error");
     const lbCounter = document.getElementById("lb-counter");
     const lbCaption = document.getElementById("lb-caption");
     const lbDim = document.getElementById("lb-dim");
@@ -1204,17 +1222,60 @@ export function renderPrDetailsHtml(
     const lbFitBtn = document.getElementById("lb-fit");
     const lbSwatches = Array.from(document.querySelectorAll("#lb-swatches .ghcc-swatch"));
 
-    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)} };
+    const lbState = { items: [], index: 0, bg: "checker", pixelated: ${Boolean(pixelated)}, failed: false };
     let lbCtrl = null;
+    let lastFocusedElement = null;
 
     function collectLightboxImages() {
       return Array.from(document.querySelectorAll(".timeline .box-body .ghcc-inline-img-wrap img"))
         .filter((img) => img.isConnected && img.naturalWidth > 0);
     }
 
+    function applyLightboxPixelated(next) {
+      lbState.pixelated = Boolean(next);
+      lbPixelBtn?.setAttribute("aria-pressed", String(lbState.pixelated));
+      lbStage?.classList.toggle("pixelated", lbState.pixelated);
+      if (lbEl?.classList.contains("open") && lbCtrl && !lbState.failed) {
+        lbCtrl.refitIfFitted();
+      }
+    }
+
+    function setLightboxFailed(failed) {
+      lbState.failed = failed;
+      if (lbImg) {
+        lbImg.hidden = failed;
+      }
+      if (lbError) {
+        lbError.hidden = !failed;
+        lbError.textContent = failed ? IMAGE_STRINGS.loadFailed : "";
+      }
+      [lbZoomOutBtn, lbZoomVal, lbZoomInBtn, lbFitBtn, lbPixelBtn].forEach((btn) => {
+        if (btn) {
+          btn.disabled = failed;
+        }
+      });
+      if (failed) {
+        if (lbDim) {
+          lbDim.textContent = "";
+        }
+        if (lbZoomVal) {
+          lbZoomVal.textContent = "—";
+        }
+      }
+    }
+
     function closeLightbox() {
-      if (lbEl) {
-        lbEl.classList.remove("open");
+      if (!lbEl || !lbEl.classList.contains("open")) {
+        return;
+      }
+      lbEl.classList.remove("open");
+      if (layoutEl) {
+        layoutEl.inert = false;
+      }
+      const target = lastFocusedElement;
+      lastFocusedElement = null;
+      if (target && target.isConnected !== false && typeof target.focus === "function") {
+        target.focus();
       }
     }
 
@@ -1222,9 +1283,20 @@ export function renderPrDetailsHtml(
       if (!lbEl || !lbStage || !lbImg || !lbCtrl || lbState.items.length === 0) {
         return;
       }
+      const wasOpen = lbEl.classList.contains("open");
+      if (!wasOpen) {
+        lastFocusedElement = document.activeElement || null;
+      }
       lbState.index = ((index % lbState.items.length) + lbState.items.length) % lbState.items.length;
       const item = lbState.items[lbState.index];
       lbEl.classList.add("open");
+      if (!wasOpen) {
+        if (layoutEl) {
+          layoutEl.inert = true;
+        }
+        lbCloseBtn?.focus?.();
+      }
+      setLightboxFailed(false);
       const multi = lbState.items.length > 1;
       if (lbCounter) {
         lbCounter.textContent = (lbState.index + 1) + " / " + lbState.items.length;
@@ -1254,10 +1326,10 @@ export function renderPrDetailsHtml(
           if (lbDim) {
             lbDim.textContent = nw + "×" + nh;
           }
-        } else if (lbDim) {
-          lbDim.textContent = "";
+          lbCtrl.fit();
+        } else {
+          setLightboxFailed(true);
         }
-        lbCtrl.fit();
       };
       lbImg.onload = onReady;
       lbImg.alt = item.alt || "";
@@ -1313,17 +1385,13 @@ export function renderPrDetailsHtml(
           lbStage.dataset.bg = lbState.bg;
         });
       });
+      lbImg.addEventListener("error", () => setLightboxFailed(true));
       lbZoomInBtn?.addEventListener("click", () => lbCtrl.stepZoom(1));
       lbZoomOutBtn?.addEventListener("click", () => lbCtrl.stepZoom(-1));
       lbFitBtn?.addEventListener("click", () => lbCtrl.fit());
       lbZoomVal?.addEventListener("click", () => lbCtrl.toggleFitOneToOne());
       lbPixelBtn?.addEventListener("click", () => {
-        lbState.pixelated = !lbState.pixelated;
-        lbPixelBtn.setAttribute("aria-pressed", String(lbState.pixelated));
-        lbStage.classList.toggle("pixelated", lbState.pixelated);
-        if (lbEl.classList.contains("open")) {
-          lbCtrl.refitIfFitted();
-        }
+        applyLightboxPixelated(!lbState.pixelated);
         vscodeApi.postMessage({ command: "setPixelated", value: lbState.pixelated });
       });
       lbCloseBtn?.addEventListener("click", closeLightbox);
@@ -1344,6 +1412,7 @@ export function renderPrDetailsHtml(
         }
         const rect = lbImg.getBoundingClientRect();
         const onImage =
+          !lbState.failed &&
           rect.width > 0 &&
           rect.height > 0 &&
           event.clientX >= rect.left &&
@@ -1362,7 +1431,13 @@ export function renderPrDetailsHtml(
         if (event.key === "Escape") {
           event.preventDefault();
           closeLightbox();
-        } else if (event.key === "ArrowLeft") {
+          return;
+        }
+        const target = event.target;
+        if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) {
+          return;
+        }
+        if (event.key === "ArrowLeft") {
           if (lbState.items.length > 1) {
             event.preventDefault();
             showLightboxIndex(lbState.index - 1);
@@ -1372,6 +1447,8 @@ export function renderPrDetailsHtml(
             event.preventDefault();
             showLightboxIndex(lbState.index + 1);
           }
+        } else if (lbState.failed) {
+          return;
         } else if (event.key === "+" || event.key === "=") {
           event.preventDefault();
           lbCtrl.stepZoom(1);
@@ -1552,6 +1629,10 @@ export function renderPrDetailsHtml(
     // the extension re-enables the buttons when a confirmation is cancelled or a mutation fails,
     // so the typed comment survives instead of being wiped by a full re-render
     window.addEventListener("message", (event) => {
+      if (event.data?.command === "pixelated" && typeof event.data.value === "boolean") {
+        applyLightboxPixelated(event.data.value);
+        return;
+      }
       if (event.data?.command === "imageResolved") {
         const { requestId, dataUri, url, message } = event.data;
         const image = failingImages.get(requestId);

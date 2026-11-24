@@ -9,20 +9,42 @@ vi.mock("./github/github", async (importOriginal) => ({
   ...await importOriginal<typeof github>(),
   getSession: vi.fn().mockResolvedValue({ accessToken: "token" }),
   fetchPullRequests: vi.fn(),
+  fetchPrDetails: vi.fn(),
+  fetchFileBytes: vi.fn(),
   fetchPrFilePatches: vi.fn().mockResolvedValue([]),
   fetchReviewThreads: vi.fn(),
   submitPendingReview: vi.fn().mockResolvedValue(undefined),
   discardPendingReview: vi.fn().mockResolvedValue(undefined),
 }));
 
+interface IMockWebviewPanel {
+  viewType: string;
+  title: string;
+  visible: boolean;
+  reveal: ReturnType<typeof vi.fn>;
+  dispose: () => void;
+  onDidDispose: (cb: () => void) => { dispose: () => void };
+  webview: {
+    html: string;
+    postMessage: ReturnType<typeof vi.fn>;
+    asWebviewUri: (uri: { toString(): string }) => { toString(): string };
+    onDidReceiveMessage: (cb: (message: unknown) => void) => { dispose: () => void };
+    emitMessage: (message: unknown) => void;
+  };
+}
+
 const host = vi.hoisted(() => {
   const subscription = { dispose: vi.fn() };
   const registered = new Map<string, (...args: unknown[]) => unknown>();
   const statusBar = { ...subscription, hide: vi.fn(), show: vi.fn(), text: "", tooltip: "" };
+  const webviewPanels: IMockWebviewPanel[] = [];
+  const globalStateStore = new Map<string, unknown>();
 
   return {
     registered,
     statusBar,
+    webviewPanels,
+    globalStateStore,
     external: vi.fn(),
     createCommentThread: vi.fn(() => ({ ...subscription })),
     commands: {
@@ -42,6 +64,33 @@ const host = vi.hoisted(() => {
       createOutputChannel: () => ({ ...subscription, appendLine: vi.fn() }),
       createStatusBarItem: () => statusBar,
       createTreeView: () => ({ ...subscription, onDidChangeCheckboxState: () => subscription }),
+      createWebviewPanel: vi.fn((viewType: string, title: string) => {
+        let onMessage: ((message: unknown) => void) | undefined;
+        let onDispose: (() => void) | undefined;
+        const panel: IMockWebviewPanel = {
+          viewType,
+          title,
+          visible: true,
+          reveal: vi.fn(),
+          dispose: () => onDispose?.(),
+          onDidDispose: (cb) => {
+            onDispose = cb;
+            return subscription;
+          },
+          webview: {
+            html: "",
+            postMessage: vi.fn().mockResolvedValue(true),
+            asWebviewUri: (uri) => uri,
+            onDidReceiveMessage: (cb) => {
+              onMessage = cb;
+              return subscription;
+            },
+            emitMessage: (message) => onMessage?.(message),
+          },
+        };
+        webviewPanels.push(panel);
+        return panel;
+      }),
       onDidChangeWindowState: () => subscription,
       showInformationMessage: vi.fn<(message: string, ...actions: string[]) => Promise<string | undefined>>().mockResolvedValue(undefined),
       showWarningMessage: vi.fn<(message: string, options: unknown, action: string) => Promise<string | undefined>>().mockResolvedValue(undefined),
@@ -60,6 +109,15 @@ vi.mock("vscode", async (importOriginal) => {
     commands: host.commands,
     workspace: host.workspace,
     window: host.window,
+    Uri: {
+      parse: original.Uri.parse,
+      from: original.Uri.from,
+      joinPath: (base: { path: string }, ...segments: string[]) => {
+        const joined = [base.path, ...segments].join("/");
+        return { scheme: "file", path: joined, toString: () => joined };
+      },
+    },
+    ViewColumn: { Active: -1 },
     StatusBarAlignment: { Left: 1 },
   };
 });
@@ -118,10 +176,21 @@ async function openDiff(): Promise<void> {
 describe("localized extension actions", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    host.webviewPanels.length = 0;
+    host.globalStateStore.clear();
     setTestLocale("zh-cn", chineseBundle());
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
     vi.mocked(github.fetchReviewThreads).mockResolvedValue(snapshot);
-    activate({ subscriptions, globalState: { get: () => [] } } as unknown as vscode.ExtensionContext);
+    activate({
+      subscriptions,
+      extensionUri: { scheme: "file", path: "/ext", toString: () => "/ext" },
+      globalState: {
+        get: <T>(key: string, fallback?: T) => (host.globalStateStore.has(key) ? host.globalStateStore.get(key) : fallback),
+        update: vi.fn(async (key: string, value: unknown) => {
+          host.globalStateStore.set(key, value);
+        }),
+      },
+    } as unknown as vscode.ExtensionContext);
     // The first poll seeds the notification tracker.
     await new Promise<void>((resolve) => setImmediate(resolve));
   });
@@ -188,5 +257,90 @@ describe("localized extension actions", () => {
       comments: [{ author: { name: "octocat" }, body: { value: "original content" }, label: comment }],
     });
     expect(host.statusBar.text).toContain(status);
+  });
+
+  it("syncs pixelated preference bidirectionally between PR details lightbox and file image previews", async () => {
+    vi.mocked(github.fetchPrDetails).mockResolvedValue({
+      number: pr.number,
+      title: pr.title,
+      url: pr.url,
+      repo: pr.repo,
+      author: pr.author,
+      authorAvatarUrl: "",
+      state: "OPEN",
+      isDraft: false,
+      createdAt: pr.createdAt,
+      bodyHtml: "<p>Preview</p>",
+      baseRefName: "main",
+      headRefName: pr.headRefName,
+      headRepo: pr.repo,
+      headRefOid: pr.headRefOid,
+      isBehindBase: false,
+      commitsCount: 1,
+      changedFiles: 1,
+      additions: 1,
+      deletions: 0,
+      labels: [],
+      mergeable: "MERGEABLE",
+      mergeMethods: ["SQUASH"],
+      reviewDecision: null,
+      viewerDidAuthor: false,
+      canApprove: true,
+      pendingReviewCommentCount: null,
+      reviewers: [],
+      checks: [],
+      checksTotal: 0,
+      timeline: [],
+      timelineTruncated: false,
+    });
+    vi.mocked(github.fetchFileBytes).mockResolvedValue({
+      bytes: Uint8Array.of(0x89, 0x50, 0x4e, 0x47),
+      contentType: "image/png",
+    });
+
+    await runCommand("openPrDetails", pr);
+    await runCommand("openFileDiff", {
+      pr,
+      file: { path: "images/sprite.png", changeType: "MODIFIED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+
+    await vi.waitFor(() => {
+      expect(host.webviewPanels.some((panel) => panel.viewType === "githubControlCenter.prDetails" && panel.webview.html.includes("Preview"))).toBe(true);
+      expect(host.webviewPanels.some((panel) => panel.viewType === "githubControlCenter.prImagePreview" && panel.webview.html.includes('"pixelated":true'))).toBe(true);
+    });
+    const detailsPanel = host.webviewPanels.find((panel) => panel.viewType === "githubControlCenter.prDetails")!;
+    const previewPanelA = host.webviewPanels.find((panel) => panel.viewType === "githubControlCenter.prImagePreview")!;
+
+    // Lightbox toggles pixelated OFF -> persists, syncs open preview panel, and new preview opens with false
+    detailsPanel.webview.postMessage.mockClear();
+    previewPanelA.webview.postMessage.mockClear();
+    detailsPanel.webview.emitMessage({ command: "setPixelated", value: false });
+
+    expect(host.globalStateStore.get("githubControlCenter.imageViewer.pixelated")).toBe(false);
+    expect(previewPanelA.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
+    expect(detailsPanel.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
+
+    await runCommand("openFileDiff", {
+      pr,
+      file: { path: "images/other.png", changeType: "ADDED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    await vi.waitFor(() => {
+      expect(host.webviewPanels.filter((panel) => panel.viewType === "githubControlCenter.prImagePreview")).toHaveLength(2);
+    });
+    const previewPanelB = host.webviewPanels.filter((panel) => panel.viewType === "githubControlCenter.prImagePreview")[1];
+    expect(previewPanelB.webview.html).toContain('"pixelated":false');
+
+    // File preview toggles pixelated ON -> persists and syncs both open PR details and other preview panels
+    detailsPanel.webview.postMessage.mockClear();
+    previewPanelA.webview.postMessage.mockClear();
+    previewPanelB.webview.postMessage.mockClear();
+    previewPanelA.webview.emitMessage({ command: "setPixelated", value: true });
+
+    expect(host.globalStateStore.get("githubControlCenter.imageViewer.pixelated")).toBe(true);
+    expect(detailsPanel.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
+    expect(previewPanelA.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
+    expect(previewPanelB.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
   });
 });

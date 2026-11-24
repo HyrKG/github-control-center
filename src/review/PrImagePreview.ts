@@ -114,6 +114,13 @@ export class PrImagePreview implements vscode.Disposable {
     this.pixelated = preference ? preference.get() : true;
   }
 
+  syncPixelated(value: boolean): void {
+    this.pixelated = value;
+    for (const entry of this.panels.values()) {
+      void entry.panel.webview.postMessage({ command: "pixelated", value });
+    }
+  }
+
   async open({ key, title, changeType, left, right }: IImageChange): Promise<void> {
     const existing = this.panels.get(key);
     if (existing) {
@@ -124,6 +131,7 @@ export class PrImagePreview implements vscode.Disposable {
       return;
     }
 
+    this.pixelated = this.preference?.get() ?? this.pixelated;
     const strings = typeof this.getStrings === "function" ? this.getStrings() : this.getStrings;
     const language = typeof this.getLanguage === "function" ? this.getLanguage() : this.getLanguage;
 
@@ -164,6 +172,7 @@ export class PrImagePreview implements vscode.Disposable {
       panel.webview.onDidReceiveMessage((message: unknown) => {
         const payload = message as { command?: string; value?: unknown } | null;
         if (payload?.command === "ready") {
+          this.pixelated = this.preference?.get() ?? this.pixelated;
           const current = this.panels.get(key);
           if (current && current.panel === panel) {
             void panel.webview.postMessage({ command: "state", snapshot: cloneSnapshot(current.snapshot) });
@@ -172,12 +181,11 @@ export class PrImagePreview implements vscode.Disposable {
           return;
         }
         if (payload?.command === "setPixelated" && typeof payload.value === "boolean") {
-          this.pixelated = payload.value;
-          this.preference?.set(payload.value);
-          for (const entry of this.panels.values()) {
-            if (entry.panel !== panel) {
-              void entry.panel.webview.postMessage({ command: "pixelated", value: payload.value });
-            }
+          if (this.preference) {
+            this.pixelated = payload.value;
+            void this.preference.set(payload.value);
+          } else {
+            this.syncPixelated(payload.value);
           }
         }
       });
@@ -663,6 +671,8 @@ export function renderImagePreviewHtml(
 
       const state = {
         snapshot: BOOT.snapshot,
+        lastRevision: BOOT.snapshot.revision,
+        failedDataUris: { base: null, head: null },
         mode: "split",
         activeSide: "head",
         bg: "checker",
@@ -889,23 +899,53 @@ export function renderImagePreviewHtml(
         img.className = "canvas-img";
         img.alt = side.path;
         img.draggable = false;
-        const handleLoad = () => {
+        let settled = false;
+        const fail = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          onError?.();
+        };
+        const succeed = () => {
+          if (settled) {
+            return;
+          }
           const nw = img.naturalWidth;
           const nh = img.naturalHeight;
-          if (nw > 0 && nh > 0) {
-            img.width = nw;
-            img.height = nh;
-            state.dims[side.side] = { w: nw, h: nh };
-            onLoaded();
+          if (!(nw > 0 && nh > 0)) {
+            fail();
+            return;
+          }
+          settled = true;
+          img.width = nw;
+          img.height = nh;
+          state.dims[side.side] = { w: nw, h: nh };
+          onLoaded();
+        };
+        const handleLoad = () => {
+          if (settled) {
+            return;
+          }
+          if (!(img.naturalWidth > 0 && img.naturalHeight > 0)) {
+            fail();
+            return;
+          }
+          if (typeof img.decode === "function") {
+            Promise.resolve(img.decode()).then(succeed, fail);
           } else {
-            onError?.();
+            succeed();
           }
         };
         img.addEventListener("load", handleLoad);
-        img.addEventListener("error", () => onError?.());
+        img.addEventListener("error", fail);
         img.src = side.dataUri || "";
-        if (img.complete && img.naturalWidth > 0) {
-          handleLoad();
+        if (img.complete) {
+          if (img.naturalWidth > 0) {
+            handleLoad();
+          } else {
+            fail();
+          }
         }
         return img;
       }
@@ -913,6 +953,10 @@ export function renderImagePreviewHtml(
       function onImageError(targetSide) {
         if (!targetSide || targetSide.status === "error") {
           return;
+        }
+        const failedUri = targetSide.dataUri || null;
+        if (failedUri) {
+          state.failedDataUris[targetSide.side] = failedUri;
         }
         const entry = state.snapshot.sides.find((s) => s.side === targetSide.side);
         if (entry) {
@@ -922,6 +966,27 @@ export function renderImagePreviewHtml(
         }
         delete state.dims[targetSide.side];
         renderStage({ forceRebuild: true, preserveTransform: !ctrl.state.isFitted });
+      }
+
+      function applyFailedOverrides(snapshot) {
+        if (snapshot.revision !== state.lastRevision) {
+          state.lastRevision = snapshot.revision;
+          state.failedDataUris = { base: null, head: null };
+          state.dims = Object.create(null);
+        }
+        return {
+          ...snapshot,
+          sides: snapshot.sides.map((side) => {
+            const failedUri = state.failedDataUris[side.side];
+            if (failedUri && side.status === "ready" && side.dataUri === failedUri) {
+              return { ...side, status: "error", dataUri: undefined, message: STRINGS.loadFailed };
+            }
+            if (failedUri && side.dataUri && side.dataUri !== failedUri) {
+              state.failedDataUris[side.side] = null;
+            }
+            return { ...side };
+          }),
+        };
       }
 
       function onImageReady(preserveTransform) {
@@ -1119,7 +1184,7 @@ export function renderImagePreviewHtml(
             sides.find((s) => s.status === "toolarge") ||
             sides.find((s) => s.status === "unsupported") ||
             sides[0];
-          const url = getSide("head")?.url || getSide("base")?.url || "";
+          const url = primary?.url || getSide("head")?.url || getSide("base")?.url || "";
           stageWrap.appendChild(
             createStateCard(primary?.status || "error", primary?.message || STRINGS.loadFailed, url),
           );
@@ -1364,6 +1429,14 @@ export function renderImagePreviewHtml(
           return;
         }
         if (e.key === "Tab" && hasTwoSides() && state.mode === "single") {
+          const target = e.target;
+          const inToolbarOrControl = Boolean(
+            target?.closest?.(".pr-img-toolbar, button, a, input, select, textarea") ||
+            /^(BUTTON|A|INPUT|SELECT|TEXTAREA)$/.test(target?.tagName || ""),
+          );
+          if (inToolbarOrControl) {
+            return;
+          }
           e.preventDefault();
           setActiveSide(state.activeSide === "head" ? "base" : "head");
           return;
@@ -1403,7 +1476,7 @@ export function renderImagePreviewHtml(
         if (event.data?.command !== "state" || !event.data.snapshot) {
           return;
         }
-        state.snapshot = event.data.snapshot;
+        state.snapshot = applyFailedOverrides(event.data.snapshot);
         renderStage({ preserveTransform: !ctrl.state.isFitted });
       });
 

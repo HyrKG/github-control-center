@@ -1392,8 +1392,64 @@ describe("fetchFileBytes", () => {
     expect(result.contentType).toBe("image/png");
     expect(request).toHaveBeenCalledExactlyOnceWith(
       "https://api.github.com/repos/acme/repo/contents/assets/%E7%BB%98%E5%9B%BE%20%231.png?ref=feature%2Ficons",
-      { headers: { Authorization: "Bearer token", Accept: "application/vnd.github.raw+json" }, redirect: "error" },
+      {
+        headers: { Authorization: "Bearer token", Accept: "application/vnd.github.raw+json" },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
+      },
     );
+  });
+
+  it("rejects invalid repo names and unsafe path segments before issuing a request", async () => {
+    const request = vi.fn();
+    vi.stubGlobal("fetch", request);
+
+    await expect(fetchFileBytes("token", "invalid-repo", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "a/b/c", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "../repo", "a.png", "main")).rejects.toThrow("Invalid repository name");
+    await expect(fetchFileBytes("token", "acme/repo", "", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "/leading.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a//b.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a/./b.png", "main")).rejects.toThrow("Invalid repository file path");
+    await expect(fetchFileBytes("token", "acme/repo", "a/../b.png", "main")).rejects.toThrow("Invalid repository file path");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("cancels response bodies on non-2xx statuses, stream errors, and honours abort signals", async () => {
+    const cancel404 = vi.fn();
+    const errorStreamCancel = vi.fn().mockResolvedValue(undefined);
+    const releaseLock = vi.fn();
+    const failedResponse = new Response(new ReadableStream({ cancel: cancel404 }), { status: 404 });
+    const brokenResponse = {
+      ok: true,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockRejectedValue(new Error("socket reset")),
+          cancel: errorStreamCancel,
+          releaseLock,
+        }),
+      },
+    } as unknown as Response;
+    const controller = new AbortController();
+    const request = vi.fn()
+      .mockResolvedValueOnce(failedResponse)
+      .mockResolvedValueOnce(brokenResponse)
+      .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")), { once: true });
+      }));
+    vi.stubGlobal("fetch", request);
+
+    await expect(fetchFileBytes("token", "acme/repo", "missing.png", "main")).rejects.toThrow("404");
+    expect(cancel404).toHaveBeenCalledOnce();
+
+    await expect(fetchFileBytes("token", "acme/repo", "broken.png", "main")).rejects.toThrow("socket reset");
+    expect(errorStreamCancel).toHaveBeenCalledOnce();
+    expect(releaseLock).toHaveBeenCalledOnce();
+
+    const pending = fetchFileBytes("token", "acme/repo", "slow.png", "main", controller.signal);
+    controller.abort(new Error("timed out"));
+    await expect(pending).rejects.toThrow("timed out");
   });
 
   it("propagates REST and blocked redirect failures", async () => {

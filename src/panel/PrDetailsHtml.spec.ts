@@ -2,7 +2,7 @@ import { runInNewContext, Script } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
 import { createPrDetailsStrings } from "./PrDetailsStrings";
-import { renderPrDetailsHtml } from "./PrDetailsHtml";
+import { decodeHtmlEntities, renderPrDetailsHtml } from "./PrDetailsHtml";
 import type { IBriefState, IPrDetails } from "../core/types";
 
 const NONCE = "test-nonce-123";
@@ -987,6 +987,7 @@ describe("inline image lightbox", () => {
       height = 0;
       complete = true;
       isConnected = true;
+      inert = false;
       dataset: Record<string, string> = {};
       parentNode: MockEl | null = null;
       parentElement: MockEl | null = null;
@@ -997,6 +998,7 @@ describe("inline image lightbox", () => {
       rect = { left: 100, top: 100, right: 500, bottom: 400, width: 400, height: 300 };
       style = { transform: "", setProperty: vi.fn() };
       onload: (() => void) | null = null;
+      focus = vi.fn();
 
       constructor(
         public readonly tagName: string,
@@ -1075,6 +1077,9 @@ describe("inline image lightbox", () => {
         if (selector === ".ghcc-inline-img-wrap" && this.className.includes("ghcc-inline-img-wrap")) {
           return this;
         }
+        if (selector === ".ghcc-lightbox" && this.className.includes("ghcc-lightbox")) {
+          return this;
+        }
         if (selector === "a" && this.tagName === "A") {
           return this;
         }
@@ -1120,11 +1125,17 @@ describe("inline image lightbox", () => {
     unsafeAnchor.appendChild(dataImg);
     boxBody.appendChild(unsafeAnchor);
 
+    const layoutEl = new MockEl("DIV");
+    layoutEl.className = "layout";
+    const triggerEl = new MockEl("BUTTON");
     const lbEl = new MockEl("DIV");
+    lbEl.className = "ghcc-lightbox";
     const lbStage = new MockEl("DIV");
     lbStage.rect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
     const lbImg = new MockImage("", 1200, 800);
     lbImg.rect = { left: 200, top: 150, right: 800, bottom: 650, width: 600, height: 500 };
+    const lbError = new MockEl("DIV");
+    lbError.hidden = true;
     const lbCounter = new MockEl("SPAN");
     const lbCaption = new MockEl("SPAN");
     const lbDim = new MockEl("SPAN");
@@ -1137,6 +1148,7 @@ describe("inline image lightbox", () => {
     const lbZoomIn = new MockEl("BUTTON");
     const lbZoomOut = new MockEl("BUTTON");
     const lbFit = new MockEl("BUTTON");
+    [lbZoomVal, lbPrev, lbNext, lbPixel, lbClose, lbZoomIn, lbZoomOut, lbFit].forEach((btn) => lbEl.appendChild(btn));
     const composer = new MockEl("TEXTAREA");
     const commentBtn = new MockEl("BUTTON");
 
@@ -1144,6 +1156,7 @@ describe("inline image lightbox", () => {
       "ghcc-lightbox": lbEl,
       "lb-stage": lbStage,
       "lb-img": lbImg,
+      "lb-error": lbError,
       "lb-counter": lbCounter,
       "lb-caption": lbCaption,
       "lb-dim": lbDim,
@@ -1162,7 +1175,31 @@ describe("inline image lightbox", () => {
 
     const postMessage = vi.fn();
     const docListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
+    const windowListeners = new Map<string, Array<(e: Record<string, unknown>) => void>>();
     const script = render().split(`<script nonce="${NONCE}">`)[1].split("</script>")[0];
+    const mockDocument = {
+      activeElement: triggerEl,
+      getElementById: (id: string) => byId[id] ?? null,
+      querySelector: (selector: string) => (selector === ".layout" ? layoutEl : null),
+      querySelectorAll: (selector: string) => {
+        if (selector === "button") {
+          return [commentBtn, lbClose, lbPixel, lbZoomIn, lbZoomOut, lbFit, lbZoomVal];
+        }
+        if (selector === ".timeline .box-body img") {
+          return [badge, linkedImg, dataImg];
+        }
+        if (selector === ".timeline .box-body .ghcc-inline-img-wrap img") {
+          return [linkedImg, dataImg].filter((img) => Boolean(img.closest(".ghcc-inline-img-wrap")));
+        }
+        return [];
+      },
+      addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => {
+        const list = docListeners.get(event) ?? [];
+        list.push(fn);
+        docListeners.set(event, list);
+      },
+      createElement: (tag: string) => new MockEl(tag.toUpperCase()),
+    };
 
     runInNewContext(script, {
       acquireVsCodeApi: () => ({ getState: () => undefined, setState: vi.fn(), postMessage }),
@@ -1170,26 +1207,16 @@ describe("inline image lightbox", () => {
       setTimeout,
       clearTimeout,
       HTMLImageElement: MockImage,
-      document: {
-        getElementById: (id: string) => byId[id] ?? null,
-        querySelector: () => null,
-        querySelectorAll: (selector: string) => {
-          if (selector === ".timeline .box-body img") {
-            return [badge, linkedImg, dataImg];
-          }
-          if (selector === ".timeline .box-body .ghcc-inline-img-wrap img") {
-            return [linkedImg, dataImg].filter((img) => Boolean(img.closest(".ghcc-inline-img-wrap")));
-          }
-          return [];
-        },
+      document: mockDocument,
+      window: {
         addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => {
-          const list = docListeners.get(event) ?? [];
+          const list = windowListeners.get(event) ?? [];
           list.push(fn);
-          docListeners.set(event, list);
+          windowListeners.set(event, list);
         },
-        createElement: (tag: string) => new MockEl(tag.toUpperCase()),
+        scrollTo: vi.fn(),
+        scrollY: 0,
       },
-      window: { addEventListener: vi.fn(), scrollTo: vi.fn(), scrollY: 0 },
     });
 
     // Badge skipped; content images wrapped
@@ -1245,10 +1272,76 @@ describe("inline image lightbox", () => {
     lbStage.emit("click", { target: lbStage, clientX: 20, clientY: 20 });
     expect(lbEl.classList.contains("open")).toBe(false);
 
-    // Reopening another image still keeps pixelated=false
+    // Reopening another image still keeps pixelated=false and isolates .layout / moves focus
+    expect(layoutEl.inert).toBe(false);
+    expect(triggerEl.focus).toHaveBeenCalledOnce();
+    lbClose.focus.mockClear();
     dataWrap.emit("click", { metaKey: false, ctrlKey: false, shiftKey: false, button: 0, preventDefault: vi.fn() });
     expect(lbStage.classList.contains("pixelated")).toBe(false);
     expect(lbPixel.getAttribute("aria-pressed")).toBe("false");
+    expect(layoutEl.inert).toBe(true);
+    expect(lbClose.focus).toHaveBeenCalledOnce();
+
+    // Host pixelated sync updates lightbox state without echoing back
+    postMessage.mockClear();
+    for (const fn of windowListeners.get("message") ?? []) {
+      fn({ data: { command: "pixelated", value: true } });
+    }
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+    expect(lbPixel.getAttribute("aria-pressed")).toBe("true");
+    expect(postMessage).not.toHaveBeenCalled();
+
+    // Lightbox keydown ignores non-Escape shortcuts when focused in an input/textarea, but Escape still closes
+    const inputP = { key: "p", target: composer, preventDefault: vi.fn() };
+    for (const fn of docListeners.get("keydown") ?? []) {
+      fn(inputP);
+    }
+    expect(inputP.preventDefault).not.toHaveBeenCalled();
+    expect(lbStage.classList.contains("pixelated")).toBe(true);
+
+    // #lb-img error shows fallback message, disables zoom/pixel controls, keeps close/GitHub usable, and resets on next image
+    lbImg.emit("error", {});
+    expect(lbImg.hidden).toBe(true);
+    expect(lbError.hidden).toBe(false);
+    expect(lbError.textContent).toBe("Could not load this image.");
+    expect(lbDim.textContent).toBe("");
+    expect(lbZoomVal.textContent).toBe("—");
+    expect(lbZoomIn.disabled).toBe(true);
+    expect(lbPixel.disabled).toBe(true);
+    expect(lbClose.disabled).toBe(false);
+    expect(lbGithub.href).toBe("https://github.com/acme/repo/pull/42");
+
+    lbNext.emit("click", {});
+    expect(lbImg.hidden).toBe(false);
+    expect(lbError.hidden).toBe(true);
+    expect(lbZoomIn.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // send() freezes page buttons but excludes lightbox buttons
+    composer.value = "Looks good";
+    composer.emit("input", {});
+    commentBtn.emit("click", {});
+    expect(commentBtn.disabled).toBe(true);
+    expect(lbClose.disabled).toBe(false);
+    expect(lbPixel.disabled).toBe(false);
+
+    // Escape closes lightbox and restores .layout + focus
+    triggerEl.focus.mockClear();
+    const esc = { key: "Escape", target: composer, preventDefault: vi.fn() };
+    for (const fn of docListeners.get("keydown") ?? []) {
+      fn(esc);
+    }
+    expect(esc.preventDefault).toHaveBeenCalledOnce();
+    expect(lbEl.classList.contains("open")).toBe(false);
+    expect(layoutEl.inert).toBe(false);
+    expect(triggerEl.focus).toHaveBeenCalledOnce();
+  });
+
+  it("replaces out-of-range and surrogate numeric HTML entities with U+FFFD without throwing", () => {
+    expect(decodeHtmlEntities("&#1114112;")).toBe("\uFFFD");
+    expect(decodeHtmlEntities("&#x110000;")).toBe("\uFFFD");
+    expect(decodeHtmlEntities("&#55296;&#xDFFF;")).toBe("\uFFFD\uFFFD");
+    expect(decodeHtmlEntities("&#65;&#x42;&amp;")).toBe("AB&");
   });
 
   it("compiles all inline webview scripts cleanly and localizes lightbox and image fallback copy", () => {

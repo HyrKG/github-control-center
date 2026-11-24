@@ -519,14 +519,20 @@ export const IMAGE_VIEWER_CONTROLLER_SCRIPT = `
         if (!state.dragging) {
           return;
         }
-        state.tx += e.clientX - state.px;
-        state.ty += e.clientY - state.py;
-        state.px = e.clientX;
-        state.py = e.clientY;
-        if (!state.moved && Math.hypot(e.clientX - state.startX, e.clientY - state.startY) >= GHCC_DRAG_THRESHOLD) {
+        if (!state.moved) {
+          if (Math.hypot(e.clientX - state.startX, e.clientY - state.startY) < GHCC_DRAG_THRESHOLD) {
+            return;
+          }
           state.moved = true;
           state.isFitted = false;
+          state.tx += e.clientX - state.startX;
+          state.ty += e.clientY - state.startY;
+        } else {
+          state.tx += e.clientX - state.px;
+          state.ty += e.clientY - state.py;
         }
+        state.px = e.clientX;
+        state.py = e.clientY;
         onUpdate(state);
       });
 

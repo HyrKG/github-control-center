@@ -264,6 +264,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   function setImagePixelated(value: boolean): void {
     void context.globalState.update(IMAGE_PIXELATED_STATE_KEY, value);
+    imagePreview.syncPixelated(value);
+    detailsPanel.syncPixelated(value);
   }
 
   const imagePreview = new PrImagePreview(

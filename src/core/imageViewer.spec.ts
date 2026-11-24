@@ -149,6 +149,49 @@ describe("imageViewer transform controller script", () => {
     expect(ctrl.state.scale).toBe(0.1);
   });
 
+  it("ignores sub-threshold 1-3px pointer jitter without drifting tx/ty or breaking isFitted", () => {
+    const { createImageTransformController } = loadControllerScript();
+    const listeners = new Map<string, (e: Record<string, unknown>) => void>();
+    const el = {
+      addEventListener: (event: string, fn: (e: Record<string, unknown>) => void) => listeners.set(event, fn),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 300 }),
+      setPointerCapture: vi.fn(),
+      classList: { add: vi.fn(), remove: vi.fn() },
+    };
+    const onUpdate = vi.fn();
+    const ctrl = createImageTransformController({
+      getViewportRect: () => ({ left: 0, top: 0, width: 400, height: 300 }),
+      getRefSize: () => ({ w: 800, h: 600 }),
+      onUpdate,
+    });
+    ctrl.fit();
+    ctrl.bindViewport(el);
+    onUpdate.mockClear();
+
+    listeners.get("pointerdown")?.({ button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    listeners.get("pointermove")?.({ clientX: 102, clientY: 101 });
+    listeners.get("pointermove")?.({ clientX: 103, clientY: 100 });
+    listeners.get("pointerup")?.({});
+
+    expect(ctrl.state.tx).toBe(0);
+    expect(ctrl.state.ty).toBe(0);
+    expect(ctrl.state.isFitted).toBe(true);
+    expect(ctrl.consumeJustDragged()).toBe(false);
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    // Once movement reaches the 4px threshold, pan applies from startX/startY and leaves fitted state
+    listeners.get("pointerdown")?.({ button: 0, clientX: 100, clientY: 100, pointerId: 2 });
+    listeners.get("pointermove")?.({ clientX: 102, clientY: 101 });
+    listeners.get("pointermove")?.({ clientX: 110, clientY: 106 });
+    listeners.get("pointerup")?.({});
+
+    expect(ctrl.state.tx).toBe(10);
+    expect(ctrl.state.ty).toBe(6);
+    expect(ctrl.state.isFitted).toBe(false);
+    expect(ctrl.consumeJustDragged()).toBe(true);
+    expect(onUpdate).toHaveBeenCalledOnce();
+  });
+
   it("sets justDragged only when pointer moves past the drag threshold", () => {
     const { createImageTransformController } = loadControllerScript();
     const listeners = new Map<string, (e: Record<string, unknown>) => void>();

@@ -304,18 +304,23 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
 }
 
 const REST_ENDPOINT = "https://api.github.com";
+const REST_TIMEOUT_MS = 30_000;
 // GitHub lists at most 3000 files per PR: 30 pages of 100
 const MAX_FILE_PAGES = 30;
 
-async function getRest(token: string, path: string, accept: string, redirect?: RequestRedirect): Promise<Response> {
+async function getRest(token: string, path: string, accept: string, redirect?: RequestRedirect, signal?: AbortSignal): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(REST_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const response = await fetch(`${REST_ENDPOINT}${path}`, {
     ...(redirect && { redirect }),
+    signal: requestSignal,
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: accept,
     },
   });
   if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
     throw new LocalizedError(
       `GitHub REST request failed with status ${response.status}`,
       vscode.l10n.t("GitHub REST request failed with status {0}", response.status),
@@ -350,8 +355,17 @@ export async function fetchFileContent(token: string, repo: string, path: string
 }
 
 function fileContentsPath(repo: string, path: string, ref: string): string {
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-  return `/repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`;
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error(`Invalid repository name: ${repo}`);
+  }
+  const pathSegments = path.split("/");
+  if (pathSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Invalid repository file path: ${path}`);
+  }
+  const encodedRepo = repoParts.map(encodeURIComponent).join("/");
+  const encodedPath = pathSegments.map(encodeURIComponent).join("/");
+  return `/repos/${encodedRepo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`;
 }
 
 export class FileTooLargeError extends LocalizedError {
@@ -365,10 +379,10 @@ export interface IFileBytes {
   contentType: string | null;
 }
 
-export async function fetchFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes> {
-  const response = await getRest(token, fileContentsPath(repo, path, ref), "application/vnd.github.raw+json", "error");
+export async function fetchFileBytes(token: string, repo: string, path: string, ref: string, signal?: AbortSignal): Promise<IFileBytes> {
+  const response = await getRest(token, fileContentsPath(repo, path, ref), "application/vnd.github.raw+json", "error", signal);
   if (Number(response.headers.get("content-length")) > MAX_IMAGE_BYTES) {
-    await response.body?.cancel();
+    await response.body?.cancel().catch(() => {});
     throw new FileTooLargeError();
   }
   // Bound the actual stream too: the length header can be absent or describe compressed bytes.
@@ -384,11 +398,16 @@ export async function fetchFileBytes(token: string, repo: string, path: string, 
         }
         size += value.byteLength;
         if (size > MAX_IMAGE_BYTES) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {});
           throw new FileTooLargeError();
         }
         chunks.push(value);
       }
+    } catch (error) {
+      if (!(error instanceof FileTooLargeError)) {
+        await reader.cancel().catch(() => {});
+      }
+      throw error;
     } finally {
       reader.releaseLock();
     }

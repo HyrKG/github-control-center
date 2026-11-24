@@ -71,6 +71,10 @@ export class PrDetailsPanel {
     void this.panel?.webview.postMessage({ command: "imageResolved", ...result });
   }
 
+  syncPixelated(value: boolean): void {
+    void this.panel?.webview.postMessage({ command: "pixelated", value });
+  }
+
   dispose(): void {
     this.panel?.dispose();
   }

@@ -317,16 +317,17 @@ describe("PrImagePreview", () => {
     expect(html).toMatch(/id="a-pixel"[^>]*aria-pressed="true"/);
   });
 
-  it("defaults to nearest-neighbor, persists preference across new panels, and broadcasts changes to open panels", async () => {
+  it("defaults to nearest-neighbor, delegates persistence/broadcast to preference, refreshes on open/ready, and syncs standalone panels", async () => {
     let saved = true;
+    const panelA = mockPanel();
+    const read = vi.fn().mockResolvedValue(svgFile);
     const preference = {
       get: vi.fn(() => saved),
       set: vi.fn((value: boolean) => {
         saved = value;
+        preview.syncPixelated(value);
       }),
     };
-    const panelA = mockPanel();
-    const read = vi.fn().mockResolvedValue(svgFile);
     const preview = new PrImagePreview(read, undefined, preference);
 
     await preview.open(change);
@@ -336,24 +337,40 @@ describe("PrImagePreview", () => {
     await preview.open({ ...change, key: "pr:other", title: "other.png (PR #42)" });
     expect(panelB.webview.html).toContain('"pixelated":true');
 
-    // User turns off nearest-neighbor on panelA -> preference updates and panelB syncs
+    // User turns off nearest-neighbor on panelA -> delegates to preference.set which broadcasts once via syncPixelated
     panelA.webview.postMessage.mockClear();
     panelB.webview.postMessage.mockClear();
     panelA.webview.emitMessage({ command: "setPixelated", value: false });
 
-    expect(preference.set).toHaveBeenCalledWith(false);
+    expect(preference.set).toHaveBeenCalledExactlyOnceWith(false);
     expect(saved).toBe(false);
-    expect(panelA.webview.postMessage).not.toHaveBeenCalled();
+    expect(panelA.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
     expect(panelB.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
 
-    // Opening a third image (or a new PrImagePreview instance) keeps the persisted false state
+    // External update (e.g., from details lightbox) is picked up on ready handshake and newly opened panels
+    saved = true;
+    panelA.webview.postMessage.mockClear();
+    panelA.webview.emitMessage({ command: "ready" });
+    expect(panelA.webview.postMessage).toHaveBeenCalledWith({ command: "pixelated", value: true });
+
     const panelC = mockPanel();
     await preview.open({ ...change, key: "pr:third", title: "large.png (PR #42)" });
-    expect(panelC.webview.html).toContain('"pixelated":false');
-    expect(panelC.webview.html).toMatch(/id="a-pixel"[^>]*aria-pressed="false"/);
+    expect(panelC.webview.html).toContain('"pixelated":true');
+    expect(panelC.webview.html).toMatch(/id="a-pixel"[^>]*aria-pressed="true"/);
+
+    // Standalone preview (without preference) still broadcasts via syncPixelated
+    const standaloneA = mockPanel();
+    const standalonePreview = new PrImagePreview(read);
+    await standalonePreview.open(change);
+    const standaloneB = mockPanel();
+    await standalonePreview.open({ ...change, key: "pr:standalone-b", title: "b.png (PR #42)" });
+    standaloneA.webview.postMessage.mockClear();
+    standaloneB.webview.postMessage.mockClear();
+    standaloneA.webview.emitMessage({ command: "setPixelated", value: false });
+    expect(standaloneB.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: false });
   });
 
-  it("compiles its inline script cleanly and executes the image load and fallback lifecycle", () => {
+  it("compiles its inline script cleanly and executes load, Tab guard, pixelated sync, decode error persistence, and primary link alignment", async () => {
     class MockDomEl {
       className = "";
       title = "";
@@ -370,6 +387,8 @@ describe("PrImagePreview", () => {
       naturalWidth = 0;
       naturalHeight = 0;
       complete = false;
+      decode?: () => Promise<void>;
+      parentNode: MockDomEl | null = null;
       dataset: Record<string, string> = {};
       children: MockDomEl[] = [];
       attrs = new Map<string, string>();
@@ -414,6 +433,7 @@ describe("PrImagePreview", () => {
       append(...nodes: Array<MockDomEl | string>): void {
         for (const node of nodes) {
           if (node instanceof MockDomEl) {
+            node.parentNode = this;
             this.children.push(node);
           } else {
             this._textContent += node;
@@ -422,6 +442,7 @@ describe("PrImagePreview", () => {
       }
 
       appendChild(node: MockDomEl): MockDomEl {
+        node.parentNode = this;
         this.children.push(node);
         return node;
       }
@@ -434,6 +455,19 @@ describe("PrImagePreview", () => {
 
       getAttribute(name: string): string | null {
         return this.attrs.get(name) ?? null;
+      }
+
+      closest(selector: string): MockDomEl | null {
+        const selectors = selector.split(",").map((part) => part.trim());
+        for (const candidate of selectors) {
+          if (candidate.startsWith(".") && this.className.split(/\s+/).includes(candidate.slice(1))) {
+            return this;
+          }
+          if (!candidate.startsWith(".") && this.tagName.toLowerCase() === candidate.toLowerCase()) {
+            return this;
+          }
+        }
+        return this.parentNode?.closest(selector) ?? null;
       }
 
       addEventListener(type: string, callback: (event: Record<string, unknown>) => void): void {
@@ -475,6 +509,107 @@ describe("PrImagePreview", () => {
       }
     }
 
+    function bootVm(snapshot: IImagePreviewSnapshot, onCreateElement?: (el: MockDomEl) => void) {
+      const html = renderImagePreviewHtml(snapshot, "nonce-runtime");
+      const match = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
+      expect(match?.[1]).toBeTruthy();
+      const inlineScript = match![1];
+      expect(() => new Script(inlineScript)).not.toThrow();
+
+      const byId = new Map<string, MockDomEl>();
+      const makeEl = (id: string, tagName = "div", dataset: Record<string, string> = {}): MockDomEl => {
+        const el = new MockDomEl(tagName, id);
+        el.dataset = dataset;
+        byId.set(id, el);
+        return el;
+      };
+      const toolbar = new MockDomEl("header");
+      toolbar.className = "pr-img-toolbar";
+      const stageWrap = makeEl("a-stage-wrap", "main");
+      makeEl("a-pill", "span");
+      makeEl("a-path", "span");
+      const statsEl = makeEl("a-stats", "span");
+      makeEl("a-diff-modes", "div");
+      makeEl("a-side-toggle", "div");
+      makeEl("a-zoom-out", "button");
+      const zoomValBtn = makeEl("a-zoom-val", "button");
+      const zoomInBtn = makeEl("a-zoom-in", "button");
+      makeEl("a-fit", "button");
+      const pixelBtn = makeEl("a-pixel", "button");
+      pixelBtn.setAttribute("aria-pressed", "true");
+      toolbar.appendChild(pixelBtn);
+      makeEl("a-github", "a");
+
+      const modeButtons = [
+        Object.assign(new MockDomEl("button"), { dataset: { mode: "split" } }),
+        Object.assign(new MockDomEl("button"), { dataset: { mode: "swipe" } }),
+        Object.assign(new MockDomEl("button"), { dataset: { mode: "single" } }),
+      ];
+      const sideButtons = [
+        Object.assign(new MockDomEl("button"), { dataset: { side: "base" } }),
+        Object.assign(new MockDomEl("button"), { dataset: { side: "head" } }),
+      ];
+      const swatchButtons = [
+        Object.assign(new MockDomEl("button"), { dataset: { bg: "checker" } }),
+        Object.assign(new MockDomEl("button"), { dataset: { bg: "light" } }),
+      ];
+
+      const docListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+      const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+      const postMessage = vi.fn();
+
+      runInNewContext(inlineScript, {
+        acquireVsCodeApi: () => ({ postMessage }),
+        requestAnimationFrame: (callback: () => void) => callback(),
+        document: {
+          getElementById: (id: string) => byId.get(id) ?? null,
+          querySelectorAll: (selector: string) => {
+            if (selector === "#a-diff-modes [data-mode]") {
+              return modeButtons;
+            }
+            if (selector === "#a-side-toggle [data-side]") {
+              return sideButtons;
+            }
+            if (selector === "#a-swatches .ghcc-swatch") {
+              return swatchButtons;
+            }
+            return [];
+          },
+          addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
+            const list = docListeners.get(type) ?? [];
+            list.push(callback);
+            docListeners.set(type, list);
+          },
+          createElement: (tag: string) => {
+            const el = new MockDomEl(tag);
+            onCreateElement?.(el);
+            return el;
+          },
+        },
+        window: {
+          addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
+            const list = windowListeners.get(type) ?? [];
+            list.push(callback);
+            windowListeners.set(type, list);
+          },
+        },
+      });
+
+      const emitWindow = (type: string, event: Record<string, unknown>): void => {
+        for (const listener of windowListeners.get(type) ?? []) {
+          listener(event);
+        }
+      };
+      const emitDoc = (type: string, event: Record<string, unknown>): void => {
+        for (const listener of docListeners.get(type) ?? []) {
+          listener(event);
+        }
+      };
+
+      return { stageWrap, statsEl, zoomValBtn, zoomInBtn, pixelBtn, modeButtons, sideButtons, postMessage, emitWindow, emitDoc };
+    }
+
+    // 1. Happy path: ready -> state -> load -> Toggle Tab guard -> host pixelated sync
     const initialSnapshot: IImagePreviewSnapshot = {
       revision: "rev-runtime",
       changeType: "MODIFIED",
@@ -500,81 +635,9 @@ describe("PrImagePreview", () => {
       ],
     };
 
-    const html = renderImagePreviewHtml(initialSnapshot, "nonce-runtime");
-    const match = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
-    expect(match?.[1]).toBeTruthy();
-    const inlineScript = match![1];
-    expect(() => new Script(inlineScript)).not.toThrow();
-
-    const byId = new Map<string, MockDomEl>();
-    const makeEl = (id: string, tagName = "div", dataset: Record<string, string> = {}): MockDomEl => {
-      const el = new MockDomEl(tagName, id);
-      el.dataset = dataset;
-      byId.set(id, el);
-      return el;
-    };
-    const stageWrap = makeEl("a-stage-wrap", "main");
-    makeEl("a-pill", "span");
-    makeEl("a-path", "span");
-    const statsEl = makeEl("a-stats", "span");
-    makeEl("a-diff-modes", "div");
-    makeEl("a-side-toggle", "div");
-    makeEl("a-zoom-out", "button");
-    const zoomValBtn = makeEl("a-zoom-val", "button");
-    const zoomInBtn = makeEl("a-zoom-in", "button");
-    makeEl("a-fit", "button");
-    const pixelBtn = makeEl("a-pixel", "button");
-    pixelBtn.setAttribute("aria-pressed", "true");
-    makeEl("a-github", "a");
-
-    const modeButtons = [
-      Object.assign(new MockDomEl("button"), { dataset: { mode: "split" } }),
-      Object.assign(new MockDomEl("button"), { dataset: { mode: "swipe" } }),
-      Object.assign(new MockDomEl("button"), { dataset: { mode: "single" } }),
-    ];
-    const sideButtons = [
-      Object.assign(new MockDomEl("button"), { dataset: { side: "base" } }),
-      Object.assign(new MockDomEl("button"), { dataset: { side: "head" } }),
-    ];
-    const swatchButtons = [
-      Object.assign(new MockDomEl("button"), { dataset: { bg: "checker" } }),
-      Object.assign(new MockDomEl("button"), { dataset: { bg: "light" } }),
-    ];
-
-    const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
-    const postMessage = vi.fn();
-
-    runInNewContext(inlineScript, {
-      acquireVsCodeApi: () => ({ postMessage }),
-      requestAnimationFrame: (callback: () => void) => callback(),
-      document: {
-        getElementById: (id: string) => byId.get(id) ?? null,
-        querySelectorAll: (selector: string) => {
-          if (selector === "#a-diff-modes [data-mode]") {
-            return modeButtons;
-          }
-          if (selector === "#a-side-toggle [data-side]") {
-            return sideButtons;
-          }
-          if (selector === "#a-swatches .ghcc-swatch") {
-            return swatchButtons;
-          }
-          return [];
-        },
-        addEventListener: () => undefined,
-        createElement: (tag: string) => new MockDomEl(tag),
-      },
-      window: {
-        addEventListener: (type: string, callback: (event: Record<string, unknown>) => void) => {
-          const list = windowListeners.get(type) ?? [];
-          list.push(callback);
-          windowListeners.set(type, list);
-        },
-      },
-    });
-
-    expect(postMessage).toHaveBeenCalledWith({ command: "ready" });
-    expect(stageWrap.findAll((el) => el.className === "state-title")[0]?.textContent).toBe("Loading image…");
+    const vm = bootVm(initialSnapshot);
+    expect(vm.postMessage).toHaveBeenCalledWith({ command: "ready" });
+    expect(vm.stageWrap.findAll((el) => el.className === "state-title")[0]?.textContent).toBe("Loading image…");
 
     const loadedSnapshot: IImagePreviewSnapshot = {
       ...initialSnapshot,
@@ -583,14 +646,12 @@ describe("PrImagePreview", () => {
         { ...initialSnapshot.sides[1], status: "ready", dataUri: "data:image/png;base64,BB==", size: 256 },
       ],
     };
-    for (const listener of windowListeners.get("message") ?? []) {
-      listener({ data: { command: "state", snapshot: loadedSnapshot } });
-    }
+    vm.emitWindow("message", { data: { command: "state", snapshot: loadedSnapshot } });
 
-    const imgs = stageWrap.findAll((el) => el.tagName === "img");
+    const imgs = vm.stageWrap.findAll((el) => el.tagName === "img");
     expect(imgs).toHaveLength(2);
-    expect(zoomInBtn.disabled).toBe(false);
-    expect(pixelBtn.disabled).toBe(false);
+    expect(vm.zoomInBtn.disabled).toBe(false);
+    expect(vm.pixelBtn.disabled).toBe(false);
 
     imgs[0].naturalWidth = 32;
     imgs[0].naturalHeight = 16;
@@ -599,17 +660,97 @@ describe("PrImagePreview", () => {
     imgs[1].naturalHeight = 16;
     imgs[1].emit("load", {});
 
-    expect(stageWrap.findAll((el) => el.className === "state-empty")).toHaveLength(0);
-    expect(statsEl.textContent).toBe("+128 B");
-    expect(stageWrap.findAll((el) => el.textContent.includes("32×16"))).toHaveLength(2);
-    expect(zoomValBtn.textContent).not.toBe("—");
+    expect(vm.stageWrap.findAll((el) => el.className === "state-empty")).toHaveLength(0);
+    expect(vm.statsEl.textContent).toBe("+128 B");
+    expect(vm.stageWrap.findAll((el) => el.textContent.includes("32×16"))).toHaveLength(2);
+    expect(vm.zoomValBtn.textContent).not.toBe("—");
 
-    pixelBtn.click();
-    expect(pixelBtn.getAttribute("aria-pressed")).toBe("false");
-    expect(postMessage).toHaveBeenCalledWith({ command: "setPixelated", value: false });
+    // Toggle mode Tab: toolbar control keeps native Tab; stage intercepts and flips head <-> base
+    vm.modeButtons[2].click();
+    expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
+    const toolbarTab = { key: "Tab", target: vm.pixelBtn, preventDefault: vi.fn() };
+    vm.emitDoc("keydown", toolbarTab);
+    expect(toolbarTab.preventDefault).not.toHaveBeenCalled();
+    expect(vm.sideButtons[1].getAttribute("aria-pressed")).toBe("true");
 
-    imgs[0].emit("error", {});
-    expect(stageWrap.findAll((el) => el.className === "state-title").some((el) => el.textContent === "Could not load this image.")).toBe(true);
+    const stageTab = { key: "Tab", target: vm.stageWrap, preventDefault: vi.fn() };
+    vm.emitDoc("keydown", stageTab);
+    expect(stageTab.preventDefault).toHaveBeenCalledOnce();
+    expect(vm.sideButtons[0].getAttribute("aria-pressed")).toBe("true");
+
+    // Local toggle posts setPixelated; incoming host sync updates UI without echoing
+    vm.postMessage.mockClear();
+    vm.pixelBtn.click();
+    expect(vm.pixelBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(vm.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "setPixelated", value: false });
+
+    vm.postMessage.mockClear();
+    vm.emitWindow("message", { data: { command: "pixelated", value: true } });
+    expect(vm.pixelBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(vm.postMessage).not.toHaveBeenCalled();
+
+    // 2. Decode rejection persists across late state snapshots for the same dataUri
+    const decodeVm = bootVm(initialSnapshot, (el) => {
+      if (el.tagName === "img") {
+        el.decode = () => Promise.reject(new Error("corrupt image"));
+      }
+    });
+    const baseReadyHeadLoading: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,BAD=", size: 16 },
+        { ...initialSnapshot.sides[1], status: "loading", message: "Loading image…" },
+      ],
+    };
+    decodeVm.emitWindow("message", { data: { command: "state", snapshot: baseReadyHeadLoading } });
+    const badImg = decodeVm.stageWrap.findAll((el) => el.tagName === "img")[0];
+    badImg.naturalWidth = 10;
+    badImg.naturalHeight = 10;
+    badImg.emit("load", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(decodeVm.stageWrap.findAll((el) => el.tagName === "img")).toHaveLength(0);
+
+    // Late snapshot arrives with Head ready and Base still carrying the same failed dataUri -> Base stays error
+    const lateSnapshot: IImagePreviewSnapshot = {
+      ...initialSnapshot,
+      sides: [
+        { ...initialSnapshot.sides[0], status: "ready", dataUri: "data:image/png;base64,BAD=", size: 16 },
+        { ...initialSnapshot.sides[1], status: "ready", dataUri: "data:image/png;base64,GOOD=", size: 64 },
+      ],
+    };
+    decodeVm.emitWindow("message", { data: { command: "state", snapshot: lateSnapshot } });
+    expect(decodeVm.stageWrap.findAll((el) => el.tagName === "img")).toHaveLength(1);
+    expect(decodeVm.stageWrap.findAll((el) => el.tagName === "img")[0].src).toBe("data:image/png;base64,GOOD=");
+    expect(decodeVm.stageWrap.findAll((el) => el.className === "state-title").some((el) => el.textContent === "Could not load this image.")).toBe(true);
+
+    // 3. Empty stage aligns external link href with primary side (toolarge Base over error Head)
+    const emptySnapshot: IImagePreviewSnapshot = {
+      revision: "rev-empty",
+      changeType: "MODIFIED",
+      displayPath: "images/huge.png",
+      isRenamed: false,
+      sides: [
+        {
+          side: "base",
+          label: "Base",
+          path: "images/huge.png",
+          url: "https://github.com/acme/repo/blob/base/images/huge.png",
+          status: "toolarge",
+          message: "The image exceeds the 10 MB preview limit.",
+        },
+        {
+          side: "head",
+          label: "Head",
+          path: "images/huge.png",
+          url: "https://github.com/acme/repo/blob/head/images/huge.png",
+          status: "error",
+          message: "Could not load this image.",
+        },
+      ],
+    };
+    const emptyVm = bootVm(emptySnapshot);
+    const actionLink = emptyVm.stageWrap.findAll((el) => el.className === "state-action")[0];
+    expect(actionLink?.href).toBe("https://github.com/acme/repo/blob/base/images/huge.png");
   });
 
   it("localizes preview HTML, toolbar labels, and loading text when locale bundle is set", async () => {
