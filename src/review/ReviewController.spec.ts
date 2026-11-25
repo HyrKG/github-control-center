@@ -37,6 +37,8 @@ const pr: IPullRequest = {
   headRefName: "feature",
   baseRefOid: "base-sha",
   headRefOid: "head-sha",
+  additions: 5,
+  deletions: 1,
 };
 
 describe("ReviewController Markdown image context", () => {

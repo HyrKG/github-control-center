@@ -27,6 +27,8 @@ function buildPr(overrides: IPrOverrides = {}): IPullRequest {
     headRefName: "feature/thing",
     baseRefOid: "base-oid",
     headRefOid: "head-oid",
+    additions: 0,
+    deletions: 0,
   };
 }
 
