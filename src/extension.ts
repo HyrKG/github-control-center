@@ -397,6 +397,29 @@ export function activate(context: vscode.ExtensionContext): void {
     return ghccConfig().get<FilesLayout>("files.layout", "tree");
   }
 
+  function getFavoriteRepos(): string[] {
+    const raw = ghccConfig().get<unknown>("favoriteRepos", []);
+    return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
+  }
+
+  async function toggleFavoriteRepo(repo: string): Promise<void> {
+    const trimmed = repo.trim();
+    if (!trimmed) {
+      return;
+    }
+    const config = ghccConfig();
+    const current = getFavoriteRepos();
+    const normalized = trimmed.toLowerCase();
+    const exists = current.some((entry) => entry.trim().toLowerCase() === normalized);
+    const next = exists
+      ? current.filter((entry) => entry.trim().toLowerCase() !== normalized)
+      : [...current, trimmed];
+    await config.update("favoriteRepos", next, vscode.ConfigurationTarget.Global);
+    for (const provider of sidebarProviders) {
+      provider.refresh();
+    }
+  }
+
   function publishFilesLayoutContext(): void {
     void vscode.commands.executeCommand("setContext", "githubControlCenter.filesLayout", getFilesLayout());
   }
@@ -404,16 +427,19 @@ export function activate(context: vscode.ExtensionContext): void {
   interface IWebviewContextTarget {
     prId?: unknown;
     filePath?: unknown;
+    repo?: unknown;
   }
 
   const sidebarActions: ISidebarActions = {
     loadFiles: loadPrFiles,
     getLayout: getFilesLayout,
+    getFavoriteRepos,
     onSignIn: () => void vscode.commands.executeCommand("githubControlCenter.signIn"),
     onOpenPrDetails: (pr) => void detailsSession.openPrDetails(pr),
     onOpenPrExternal: (pr) => openPr(pr.url),
     onCopyPrUrl: (pr) => void vscode.env.clipboard.writeText(pr.url),
     onCheckoutPr: (pr) => void checkoutBranch(pr.repo, pr.headRefName),
+    onToggleFavoriteRepo: (repo) => toggleFavoriteRepo(repo),
     onOpenFileDiff: (node) => void openFileDiff(node),
     onToggleFileViewed: async (node, viewed) => {
       await setFileViewed(await requireToken(), node.pr.id, node.file.path, viewed);
@@ -467,6 +493,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
     return undefined;
+  }
+
+  function resolveRepoTarget(target: unknown): string | undefined {
+    if (typeof target === "string" && target.trim().length > 0) {
+      return target.trim();
+    }
+    if (target && typeof target === "object") {
+      const ctx = target as IWebviewContextTarget;
+      if (typeof ctx.repo === "string" && ctx.repo.trim().length > 0) {
+        return ctx.repo.trim();
+      }
+    }
+    return resolvePrTarget(target)?.repo;
   }
   const newPrTracker = new NewPrTracker();
   const reviewDecisionTracker = new ReviewDecisionTracker();
@@ -898,6 +937,12 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(vscode.l10n.t("Muted everything from {0}", organization));
     }),
     vscode.commands.registerCommand("githubControlCenter.manageMutedRepos", manageMutedRepos),
+    vscode.commands.registerCommand("githubControlCenter.toggleFavoriteRepo", async (target: unknown) => {
+      const repo = resolveRepoTarget(target);
+      if (repo) {
+        await toggleFavoriteRepo(repo);
+      }
+    }),
     vscode.commands.registerCommand("githubControlCenter.clearBriefCache", () => {
       detailsSession.clearBriefCache();
       void vscode.window.showInformationMessage(vscode.l10n.t("AI brief cache cleared."));
@@ -963,12 +1008,17 @@ export function activate(context: vscode.ExtensionContext): void {
         if (affectsAvailability) {
           detailsSession.refreshAiAvailabilityIfStarted();
         }
-        // ai keys cannot affect PR data: skip the GitHub poll unless the same event
-        // also touched settings the poll pipeline actually reads
-        const touchesPollSettings = NON_AI_SECTIONS.some((section) => event.affectsConfiguration(section));
-        if (!touchesPollSettings) {
-          return;
+      }
+      // ai.* and favoriteRepos never affect GitHub poll results: skip the network poll unless
+      // the same event also touched settings the poll pipeline actually reads
+      const touchesPollSettings = NON_AI_SECTIONS.some((section) => event.affectsConfiguration(section));
+      if (!touchesPollSettings) {
+        if (event.affectsConfiguration("githubControlCenter.favoriteRepos")) {
+          for (const provider of sidebarProviders) {
+            provider.refresh();
+          }
         }
+        return;
       }
       publishFilesLayoutContext();
       for (const provider of sidebarProviders) {

@@ -25,6 +25,11 @@ const DEFAULT_STRINGS: ISidebarClientStrings = {
   expandPr: "Toggle changed files",
   expandRepo: "Toggle repository",
   expandFolder: "Toggle folder",
+  searchPlaceholder: "Filter by #number or title…",
+  clearSearch: "Clear search",
+  noMatchingPrs: "No matching pull requests",
+  favoriteRepo: "Favorite repository",
+  unfavoriteRepo: "Unfavorite repository",
 };
 
 function extractScripts(html: string): { bootJson: string; scriptCode: string } {
@@ -92,7 +97,9 @@ class MockElement {
   private _textContent = "";
   parentNode: MockElement | null = null;
   type = "";
+  value = "";
   tabIndex = 0;
+  selected = false;
 
   constructor(
     tagName: string,
@@ -156,8 +163,17 @@ class MockElement {
     this.ownerDoc.activeElement = this;
   }
 
+  select(): void {
+    this.selected = true;
+  }
+
   click(): void {
     this.dispatchEvent({ type: "click", stopped: false, defaultPrevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.defaultPrevented = true; } });
+  }
+
+  input(nextValue: string): void {
+    this.value = nextValue;
+    this.dispatchEvent({ type: "input", stopped: false, defaultPrevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.defaultPrevented = true; } });
   }
 
   dispatchEvent(event: MockEvent): void {
@@ -198,6 +214,9 @@ class MockElement {
 interface MockEvent {
   type: string;
   key?: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
   stopped: boolean;
   defaultPrevented: boolean;
   stopPropagation: () => void;
@@ -207,12 +226,23 @@ interface MockEvent {
 class MockDocument {
   activeElement: MockElement | null = null;
   readonly app: MockElement;
+  readonly searchBar: MockElement;
+  readonly treeRoot: MockElement;
   readonly boot: MockElement;
   private readonly listeners = new Map<string, Array<(event: MockEvent) => void>>();
 
   constructor(bootJson: string) {
     this.app = new MockElement("div", this);
+    this.app.setAttribute("id", "app");
+    this.searchBar = new MockElement("div", this);
+    this.searchBar.setAttribute("id", "search-bar");
+    this.searchBar.className = "search-bar is-hidden";
+    this.treeRoot = new MockElement("div", this);
+    this.treeRoot.setAttribute("id", "tree-root");
+    this.app.appendChild(this.searchBar);
+    this.app.appendChild(this.treeRoot);
     this.boot = new MockElement("script", this);
+    this.boot.setAttribute("id", "ghcc-boot");
     this.boot.textContent = bootJson;
   }
 
@@ -220,10 +250,16 @@ class MockDocument {
     if (id === "app") {
       return this.app;
     }
+    if (id === "search-bar") {
+      return this.searchBar;
+    }
+    if (id === "tree-root") {
+      return this.treeRoot;
+    }
     if (id === "ghcc-boot") {
       return this.boot;
     }
-    return null;
+    return this.app.findAll((el) => el.getAttribute("id") === id)[0] ?? null;
   }
 
   createElement(tag: string): MockElement {
@@ -240,10 +276,13 @@ class MockDocument {
     this.listeners.set(type, list);
   }
 
-  emitKeydown(key: string): MockEvent {
+  emitKeydown(key: string, modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean } = {}): MockEvent {
     const event: MockEvent = {
       type: "keydown",
       key,
+      ctrlKey: Boolean(modifiers.ctrlKey),
+      metaKey: Boolean(modifiers.metaKey),
+      altKey: Boolean(modifiers.altKey),
       stopped: false,
       defaultPrevented: false,
       stopPropagation() { this.stopped = true; },
@@ -332,6 +371,7 @@ function sampleExpandedSnapshot(layout: "tree" | "flat" = "tree"): ISidebarSnaps
     groups: [
       {
         repo: "acme/control-center",
+        favorite: false,
         prs: [
           {
             id: "PR_1",
@@ -690,6 +730,7 @@ describe("sidebar webview runtime (node:vm)", () => {
       groups: [
         {
           repo: xssRepo,
+          favorite: false,
           prs: [
             {
               id: "PR_XSS",
@@ -738,5 +779,198 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.app.querySelectorAll(".pr-title")[0].textContent).toBe(xssTitle);
     expect(vm.mockDocument.app.querySelectorAll(".repo-name")[0].textContent).toBe(xssRepo);
     expect(vm.mockDocument.app.querySelectorAll(".file-dir")[0].textContent).toBe("src/<img src=x onerror=alert(3)>");
+  });
+
+  it("filters PRs strictly by #number and title without recreating #search-input, auto-expands collapsed repos, and restores state on clear", () => {
+    const multiRepoSnapshot: ISidebarSnapshot = {
+      signedIn: true,
+      layout: "tree",
+      groups: [
+        {
+          repo: "org/alpha-service",
+          favorite: true,
+          prs: [
+            {
+              id: "PR_4911",
+              number: 4911,
+              title: "feat(billing): support batch invoices (#4911)",
+              repo: "org/alpha-service",
+              author: "alice",
+              isDraft: false,
+              ciState: "SUCCESS",
+              reviewGlyph: "✓",
+              reviewTone: "approved",
+              additions: 120,
+              deletions: 15,
+              meta: "alice · opened today",
+              tooltip: "org/alpha-service\nfeat(billing)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+            {
+              id: "PR_4912",
+              number: 4912,
+              title: "fix(auth): refresh expired token",
+              repo: "org/alpha-service",
+              author: "bob",
+              isDraft: false,
+              ciState: "PENDING",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 12,
+              deletions: 4,
+              meta: "bob · opened yesterday",
+              tooltip: "org/alpha-service\nfix(auth)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+          ],
+        },
+        {
+          repo: "org/beta-web",
+          favorite: false,
+          prs: [
+            {
+              id: "PR_5001",
+              number: 5001,
+              title: "chore(ui): polish dark theme",
+              repo: "org/beta-web",
+              author: "charlie",
+              isDraft: true,
+              ciState: "NONE",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 5,
+              deletions: 2,
+              meta: "charlie · opened today",
+              tooltip: "org/beta-web\nchore(ui)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+          ],
+        },
+      ],
+    };
+
+    // Start with org/alpha-service collapsed in persisted state
+    const vm = bootSidebarVm(multiRepoSnapshot, { collapsedRepos: ["org/alpha-service"] });
+    expect(vm.mockDocument.searchBar.classList.contains("is-hidden")).toBe(false);
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(1); // only beta-web's PR visible
+
+    const initialInput = vm.mockDocument.getElementById("search-input")!;
+    const clearBtn = vm.mockDocument.getElementById("search-clear")!;
+    expect(initialInput).not.toBeNull();
+    expect(clearBtn.classList.contains("is-hidden")).toBe(true);
+
+    // Ctrl+F focuses and selects the search input
+    const ctrlF = vm.mockDocument.emitKeydown("f", { ctrlKey: true });
+    expect(ctrlF.defaultPrevented).toBe(true);
+    expect(vm.mockDocument.activeElement).toBe(initialInput);
+    expect(initialInput.selected).toBe(true);
+
+    // Typing #4911 matches PR_4911, hides org/beta-web, temporarily auto-expands org/alpha-service, and updates badge count to 1
+    initialInput.input("#4911");
+    expect(vm.mockDocument.getElementById("search-input")).toBe(initialInput);
+    expect(vm.mockDocument.activeElement).toBe(initialInput);
+    expect(clearBtn.classList.contains("is-hidden")).toBe(false);
+    const matchedRepos = vm.mockDocument.treeRoot.querySelectorAll(".repo-row");
+    expect(matchedRepos).toHaveLength(1);
+    expect(matchedRepos[0].getAttribute("data-repo")).toBe("org/alpha-service");
+    expect(matchedRepos[0].findAll((el) => el.classList.contains("repo-count"))[0].textContent).toBe("1");
+    const matchedPrs = vm.mockDocument.treeRoot.querySelectorAll(".pr-row");
+    expect(matchedPrs).toHaveLength(1);
+    expect(matchedPrs[0].getAttribute("data-pr-id")).toBe("PR_4911");
+    expect(vm.setState).toHaveBeenLastCalledWith(expect.objectContaining({ searchQuery: "#4911" }));
+
+    // Host state update while typing must NOT recreate #search-input or steal focus
+    vm.sendState(multiRepoSnapshot);
+    expect(vm.mockDocument.getElementById("search-input")).toBe(initialInput);
+    expect(vm.mockDocument.activeElement).toBe(initialInput);
+
+    // Typing repo name or author name must NOT match (strictly #number + title only)
+    initialInput.input("beta-web");
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(0);
+    expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+
+    initialInput.input("alice");
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(0);
+    expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+
+    // Case-insensitive title substring match works
+    initialInput.input("EXPIRED TOKEN");
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_4912"]);
+
+    // Escape clears search and restores original collapsedRepos state (org/alpha-service collapsed again)
+    const esc = vm.mockDocument.emitKeydown("Escape");
+    expect(esc.defaultPrevented).toBe(true);
+    expect(initialInput.value).toBe("");
+    expect(clearBtn.classList.contains("is-hidden")).toBe(true);
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")).toHaveLength(2);
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_5001"]);
+
+    // Clear button also clears search and keeps focus in #search-input
+    initialInput.input("#5001");
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(1);
+    clearBtn.click();
+    expect(initialInput.value).toBe("");
+    expect(vm.mockDocument.activeElement).toBe(initialInput);
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")).toHaveLength(2);
+
+    // Signed-out state hides #search-bar even if a query was entered
+    initialInput.input("#4911");
+    vm.sendState({ signedIn: false, layout: "tree", groups: [] });
+    expect(vm.mockDocument.searchBar.classList.contains("is-hidden")).toBe(true);
+  });
+
+  it("renders favorite repo styling, repo context menu metadata, and star toggle button without collapsing the repo", () => {
+    const snap: ISidebarSnapshot = {
+      signedIn: true,
+      layout: "tree",
+      groups: [
+        {
+          repo: "org/starred-repo",
+          favorite: true,
+          prs: [sampleExpandedSnapshot("tree").groups[0].prs[0]],
+        },
+        {
+          repo: "org/regular-repo",
+          favorite: false,
+          prs: [{ ...sampleExpandedSnapshot("tree").groups[0].prs[0], id: "PR_2", number: 43, repo: "org/regular-repo" }],
+        },
+      ],
+    };
+
+    const vm = bootSidebarVm(snap);
+    expect(vm.html).toContain("--ghcc-favorite: var(--vscode-charts-yellow, #e3b341);");
+    expect(vm.html).toMatch(/\.repo-row\.is-favorite\s+\.repo-icon\s*\{\s*color:\s*var\(--ghcc-favorite\);/);
+
+    const repoRows = vm.mockDocument.treeRoot.querySelectorAll(".repo-row");
+    expect(repoRows).toHaveLength(2);
+    expect(repoRows[0].classList.contains("is-favorite")).toBe(true);
+    expect(repoRows[1].classList.contains("is-favorite")).toBe(false);
+
+    expect(JSON.parse(repoRows[0].getAttribute("data-vscode-context")!)).toEqual({
+      webviewSection: "repo",
+      repo: "org/starred-repo",
+      preventDefaultContextMenuItems: true,
+    });
+
+    const starredBtn = repoRows[0].findAll((el) => el.classList.contains("repo-action-btn"))[0];
+    const regularBtn = repoRows[1].findAll((el) => el.classList.contains("repo-action-btn"))[0];
+    expect(starredBtn.classList.contains("is-favorite")).toBe(true);
+    expect(starredBtn.getAttribute("aria-label")).toBe("Unfavorite repository");
+    expect(regularBtn.classList.contains("is-favorite")).toBe(false);
+    expect(regularBtn.getAttribute("aria-label")).toBe("Favorite repository");
+
+    // Clicking star button sends toggleFavoriteRepo and does NOT collapse the repo
+    vm.postMessage.mockClear();
+    starredBtn.click();
+    expect(vm.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "toggleFavoriteRepo", repo: "org/starred-repo" });
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")[0].getAttribute("aria-expanded")).toBe("true");
+
+    vm.postMessage.mockClear();
+    regularBtn.click();
+    expect(vm.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "toggleFavoriteRepo", repo: "org/regular-repo" });
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")[1].getAttribute("aria-expanded")).toBe("true");
   });
 });

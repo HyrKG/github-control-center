@@ -129,6 +129,7 @@ function lastPostedSnapshot(view: IMockWebviewView): ISidebarSnapshot {
 
 describe("PrSidebarViewProvider", () => {
   let layout: FilesLayout;
+  let favoriteRepos: string[];
   let actions: ISidebarActions & {
     loadFiles: Mock<(pr: IPullRequest) => Promise<IPrFile[]>>;
     onSignIn: Mock<() => void>;
@@ -136,6 +137,7 @@ describe("PrSidebarViewProvider", () => {
     onOpenPrExternal: Mock<(pr: IPullRequest) => void>;
     onCopyPrUrl: Mock<(pr: IPullRequest) => void>;
     onCheckoutPr: Mock<(pr: IPullRequest) => void>;
+    onToggleFavoriteRepo: Mock<(repo: string) => void>;
     onOpenFileDiff: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }) => void>;
     onToggleFileViewed: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }, viewed: boolean) => Promise<void>>;
     onError: Mock<(message: string) => void>;
@@ -144,14 +146,17 @@ describe("PrSidebarViewProvider", () => {
 
   beforeEach(() => {
     layout = "tree";
+    favoriteRepos = [];
     actions = {
       loadFiles: vi.fn(async () => [buildFile()]),
       getLayout: () => layout,
+      getFavoriteRepos: () => favoriteRepos,
       onSignIn: vi.fn(),
       onOpenPrDetails: vi.fn(),
       onOpenPrExternal: vi.fn(),
       onCopyPrUrl: vi.fn(),
       onCheckoutPr: vi.fn(),
+      onToggleFavoriteRepo: vi.fn(),
       onOpenFileDiff: vi.fn(),
       onToggleFileViewed: vi.fn().mockResolvedValue(undefined),
       onError: vi.fn(),
@@ -500,5 +505,53 @@ describe("PrSidebarViewProvider", () => {
       pr: expect.objectContaining({ headRefOid: "oid-2" }),
       file: freshFile,
     }));
+  });
+
+  it("pins favorite repos case-insensitively ahead of non-favorites, syncs across views, and dispatches toggleFavoriteRepo", () => {
+    favoriteRepos = ["ACME/ZETA", "  acme/middle  "];
+    const prs = [
+      buildPr({ id: "1", repo: "acme/alpha" }),
+      buildPr({ id: "2", repo: "acme/zeta" }),
+      buildPr({ id: "3", repo: "acme/beta" }),
+      buildPr({ id: "4", repo: "acme/middle" }),
+    ];
+
+    const reviewedProvider = new PrSidebarViewProvider("reviewed", actions);
+    const mineProvider = new PrSidebarViewProvider("mine", actions);
+    const toReviewView = createMockWebviewView();
+    const reviewedView = createMockWebviewView();
+    const mineView = createMockWebviewView();
+
+    for (const [p, v] of [[provider, toReviewView], [reviewedProvider, reviewedView], [mineProvider, mineView]] as const) {
+      p.setPrs(prs);
+      p.resolveWebviewView(v as unknown as vscode.WebviewView);
+      v.webview.emitMessage({ command: "ready" });
+      const snap = lastPostedSnapshot(v);
+      expect(snap.groups.map((g) => [g.repo, g.favorite])).toEqual([
+        ["acme/middle", true],
+        ["acme/zeta", true],
+        ["acme/alpha", false],
+        ["acme/beta", false],
+      ]);
+    }
+
+    // Clicking star in webview dispatches onToggleFavoriteRepo (and ignores blank repo)
+    toReviewView.webview.emitMessage({ command: "toggleFavoriteRepo", repo: "   " });
+    expect(actions.onToggleFavoriteRepo).not.toHaveBeenCalled();
+
+    toReviewView.webview.emitMessage({ command: "toggleFavoriteRepo", repo: "acme/beta" });
+    expect(actions.onToggleFavoriteRepo).toHaveBeenCalledExactlyOnceWith("acme/beta");
+
+    // Updating favorites and refreshing re-orders all three views
+    favoriteRepos = ["acme/beta"];
+    for (const [p, v] of [[provider, toReviewView], [reviewedProvider, reviewedView], [mineProvider, mineView]] as const) {
+      p.refresh();
+      expect(lastPostedSnapshot(v).groups.map((g) => [g.repo, g.favorite])).toEqual([
+        ["acme/beta", true],
+        ["acme/alpha", false],
+        ["acme/middle", false],
+        ["acme/zeta", false],
+      ]);
+    }
   });
 });

@@ -44,9 +44,14 @@ const host = vi.hoisted(() => {
   const outputLines: string[] = [];
   const webviewPanels: IMockWebviewPanel[] = [];
   const globalStateStore = new Map<string, unknown>();
+  const configStore = new Map<string, unknown>();
+  const configUpdate = vi.fn(async (key: string, value: unknown) => {
+    configStore.set(key, value);
+  });
   const clipboardWriteText = vi.fn();
   let onWindowStateChange: ((state: { focused: boolean }) => void) | undefined;
   let onSessionsChange: ((event: { provider: { id: string } }) => void) | undefined;
+  let onConfigChange: ((event: vscode.ConfigurationChangeEvent) => void) | undefined;
   let contentProvider: vscode.TextDocumentContentProvider | undefined;
 
   return {
@@ -56,6 +61,8 @@ const host = vi.hoisted(() => {
     outputLines,
     webviewPanels,
     globalStateStore,
+    configStore,
+    configUpdate,
     clipboardWriteText,
     external: vi.fn(),
     createCommentThread: vi.fn(() => ({ ...subscription })),
@@ -65,6 +72,12 @@ const host = vi.hoisted(() => {
     },
     emitSessionsChange: (providerId: string) => {
       onSessionsChange?.({ provider: { id: providerId } });
+    },
+    emitConfigChange: (affectedSections: string[]) => {
+      onConfigChange?.({
+        affectsConfiguration: (section: string) =>
+          affectedSections.some((changed) => changed === section || changed.startsWith(`${section}.`) || section.startsWith(`${changed}.`)),
+      });
     },
     getContentProvider: () => contentProvider,
     authentication: {
@@ -81,8 +94,14 @@ const host = vi.hoisted(() => {
       executeCommand: vi.fn(async (id: string) => registered.get(id)?.()),
     },
     workspace: {
-      getConfiguration: () => ({ get: <T>(_: string, fallback: T) => fallback, update: vi.fn().mockResolvedValue(undefined) }),
-      onDidChangeConfiguration: () => subscription,
+      getConfiguration: () => ({
+        get: <T>(key: string, fallback: T) => (configStore.has(key) ? (configStore.get(key) as T) : fallback),
+        update: configUpdate,
+      }),
+      onDidChangeConfiguration: (cb: (event: vscode.ConfigurationChangeEvent) => void) => {
+        onConfigChange = cb;
+        return subscription;
+      },
       registerTextDocumentContentProvider: (_scheme: string, provider: vscode.TextDocumentContentProvider) => {
         contentProvider = provider;
         return subscription;
@@ -160,6 +179,7 @@ vi.mock("vscode", async (importOriginal) => {
     },
     ViewColumn: { Active: -1 },
     StatusBarAlignment: { Left: 1 },
+    ConfigurationTarget: { Global: 1 },
   };
 });
 
@@ -223,6 +243,7 @@ describe("localized extension actions", () => {
     host.outputLines.length = 0;
     host.window.state.focused = false;
     host.globalStateStore.clear();
+    host.configStore.clear();
     setTestLocale("zh-cn", chineseBundle());
     vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
@@ -753,6 +774,104 @@ describe("localized extension actions", () => {
     expect(toReviewProvider.findPr("PR_B")).toEqual(prB);
     expect(host.window.showInformationMessage).not.toHaveBeenCalledWith(expect.stringContaining("Account A private PR"), expect.anything(), expect.anything());
   });
+
+  it("toggles favoriteRepos case-insensitively, syncs all three sidebar views, and skips network polling on favoriteRepos-only config changes", async () => {
+    const prAlpha: IPullRequest = { ...pr, id: "PR_ALPHA", repo: "acme/alpha", number: 101 };
+    const prZeta: IPullRequest = { ...pr, id: "PR_ZETA", repo: "acme/zeta", number: 202 };
+    const reviewedAlpha: IPullRequest = {
+      ...prAlpha,
+      id: "PR_REV_ALPHA",
+      reviewDecision: "APPROVED",
+      viewerReviewState: "APPROVED",
+      isViewerApprovalStale: false,
+    };
+    const reviewedZeta: IPullRequest = {
+      ...prZeta,
+      id: "PR_REV_ZETA",
+      reviewDecision: "APPROVED",
+      viewerReviewState: "APPROVED",
+      isViewerApprovalStale: false,
+    };
+    vi.mocked(github.fetchPullRequests).mockResolvedValueOnce({
+      toReview: [prAlpha, prZeta],
+      reviewed: [reviewedAlpha, reviewedZeta],
+      mine: [prAlpha, prZeta],
+    });
+    await runCommand("refresh");
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const viewIds = [
+      "githubControlCenter.toReview",
+      "githubControlCenter.reviewed",
+      "githubControlCenter.mine",
+    ] as const;
+    const views = viewIds.map((viewId) => {
+      let onMessage: ((message: unknown) => void) | undefined;
+      const mockView = {
+        badge: undefined as vscode.ViewBadge | undefined,
+        onDidDispose: () => ({ dispose: vi.fn() }),
+        webview: {
+          options: {},
+          html: "",
+          postMessage: vi.fn().mockResolvedValue(true),
+          onDidReceiveMessage: (cb: (message: unknown) => void) => {
+            onMessage = cb;
+            return { dispose: vi.fn() };
+          },
+          emitMessage: (message: unknown) => onMessage?.(message),
+        },
+      };
+      host.webviewViewProviders.get(viewId)!.resolveWebviewView(
+        mockView as unknown as vscode.WebviewView,
+        {} as vscode.WebviewViewResolveContext,
+        {} as vscode.CancellationToken,
+      );
+      mockView.webview.emitMessage({ command: "ready" });
+      return mockView;
+    });
+
+    const latestOrder = (view: (typeof views)[number]) => {
+      const last = [...view.webview.postMessage.mock.calls].reverse()[0]?.[0] as {
+        snapshot: { groups: Array<{ repo: string; favorite: boolean }> };
+      };
+      return last.snapshot.groups.map((g) => [g.repo, g.favorite]);
+    };
+
+    for (const view of views) {
+      expect(latestOrder(view)).toEqual([["acme/alpha", false], ["acme/zeta", false]]);
+    }
+
+    // Toggle favorite via webview/context payload -> persists globally and pins across all 3 views with zero extra poll
+    vi.mocked(github.fetchPullRequests).mockClear();
+    await runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/zeta", preventDefaultContextMenuItems: true });
+    expect(host.configUpdate).toHaveBeenCalledWith("favoriteRepos", ["acme/zeta"], 1);
+    expect(github.fetchPullRequests).not.toHaveBeenCalled();
+    for (const view of views) {
+      expect(latestOrder(view)).toEqual([["acme/zeta", true], ["acme/alpha", false]]);
+    }
+
+    // External favoriteRepos config change refreshes all 3 views with zero network polling
+    host.configStore.set("favoriteRepos", ["ACME/ALPHA"]);
+    host.emitConfigChange(["githubControlCenter.favoriteRepos"]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(github.fetchPullRequests).not.toHaveBeenCalled();
+    for (const view of views) {
+      expect(latestOrder(view)).toEqual([["acme/alpha", true], ["acme/zeta", false]]);
+    }
+
+    // Toggling off matches case-insensitively ("acme/alpha" removes "ACME/ALPHA")
+    views[0].webview.emitMessage({ command: "toggleFavoriteRepo", repo: "acme/alpha" });
+    await vi.waitFor(() => expect(host.configStore.get("favoriteRepos")).toEqual([]));
+    expect(github.fetchPullRequests).not.toHaveBeenCalled();
+    for (const view of views) {
+      expect(latestOrder(view)).toEqual([["acme/alpha", false], ["acme/zeta", false]]);
+    }
+
+    // Changing a poll-affecting setting (e.g. mutedRepos) still triggers a refresh poll
+    host.emitConfigChange(["githubControlCenter.mutedRepos"]);
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(1));
+  });
 });
 
 describe("window focus cooldown", () => {
@@ -763,6 +882,7 @@ describe("window focus cooldown", () => {
     host.outputLines.length = 0;
     host.window.state.focused = true;
     host.globalStateStore.clear();
+    host.configStore.clear();
     vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
     vi.mocked(github.fetchFileContent).mockResolvedValue("file content");
