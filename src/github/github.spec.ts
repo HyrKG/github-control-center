@@ -34,6 +34,8 @@ interface IGraphQlNodeOverrides {
   rollupState?: string | null;
   isDraft?: boolean;
   reviewDecision?: string | null;
+  additions?: number;
+  deletions?: number;
   viewerLatestReview?: { state: string; commit?: { oid: string } | null; submittedAt?: string } | null;
 }
 
@@ -50,6 +52,8 @@ function buildNode(overrides: IGraphQlNodeOverrides = {}) {
     headRefName: "feature/thing",
     baseRefOid: "base-oid",
     headRefOid: "head-oid",
+    additions: overrides.additions,
+    deletions: overrides.deletions,
     author: overrides.author === undefined ? { login: "jane" } : overrides.author,
     repository: { nameWithOwner: "acme/repo" },
     headRepository: overrides.headRepository,
@@ -88,7 +92,7 @@ describe("fetchPullRequests", () => {
   });
 
   it("should map a GraphQL node to a pull request", async () => {
-    stubGraphQlData([buildNode({ rollupState: "SUCCESS", reviewDecision: "APPROVED" })]);
+    stubGraphQlData([buildNode({ rollupState: "SUCCESS", reviewDecision: "APPROVED", additions: 120, deletions: 45 })]);
 
     const snapshot = await fetchPullRequests("token");
 
@@ -109,8 +113,22 @@ describe("fetchPullRequests", () => {
         headRefName: "feature/thing",
         baseRefOid: "base-oid",
         headRefOid: "head-oid",
+        additions: 120,
+        deletions: 45,
       },
     ]);
+  });
+
+  it("should default missing additions and deletions to 0 without extra requests", async () => {
+    stubGraphQlData([buildNode()]);
+
+    const snapshot = await fetchPullRequests("token");
+
+    expect(snapshot.toReview[0]).toMatchObject({ additions: 0, deletions: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as { body: string }).body) as { query: string };
+    expect(body.query).toContain("additions");
+    expect(body.query).toContain("deletions");
   });
 
   it("keeps the fork repository alongside the base repository", async () => {

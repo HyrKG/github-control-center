@@ -36,7 +36,7 @@ import { createImageViewerStrings, viewerLanguage } from "./core/imageViewerStri
 import { imageMimeType, PrImagePreview } from "./review/PrImagePreview";
 import { PrDetailsPanel } from "./panel/PrDetailsPanel";
 import { PollScheduler } from "./poll/PollScheduler";
-import { PrTreeProvider, type FilesLayout, type IFileNode, type TreeNode } from "./tree/PrTreeProvider";
+import { PrSidebarViewProvider, type FilesLayout, type IFileNode, type ISidebarActions } from "./tree/PrSidebarViewProvider";
 import { PR_URI_SCHEME } from "./review/prUri";
 import { ReviewDecisionTracker } from "./poll/ReviewDecisionTracker";
 import type { IPrFile, IPrFilePatch, IPullRequest } from "./core/types";
@@ -322,34 +322,71 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.commands.executeCommand("setContext", "githubControlCenter.filesLayout", getFilesLayout());
   }
 
-  const toReviewProvider = new PrTreeProvider(loadPrFiles, getFilesLayout);
-  const reviewedProvider = new PrTreeProvider(loadPrFiles, getFilesLayout);
-  const mineProvider = new PrTreeProvider(loadPrFiles, getFilesLayout);
-  const toReviewView = vscode.window.createTreeView("githubControlCenter.toReview", { treeDataProvider: toReviewProvider });
-  const reviewedView = vscode.window.createTreeView("githubControlCenter.reviewed", { treeDataProvider: reviewedProvider });
-  const mineView = vscode.window.createTreeView("githubControlCenter.mine", { treeDataProvider: mineProvider });
+  interface IWebviewContextTarget {
+    prId?: unknown;
+    filePath?: unknown;
+  }
 
-  function handleCheckboxChange(event: vscode.TreeCheckboxChangeEvent<TreeNode>): void {
-    for (const [node, checkboxState] of event.items) {
-      if (node.kind !== "file") {
-        continue;
-      }
-      const viewed = checkboxState === vscode.TreeItemCheckboxState.Checked;
-      const previousState = node.file.viewedState;
-      // optimistic: node.file is the same object held by the oid cache, so the state survives tree refreshes
-      node.file.viewedState = viewed ? "VIEWED" : "UNVIEWED";
-      void (async () => {
-        try {
-          await setFileViewed(await requireToken(), node.pr.id, node.file.path, viewed);
-        } catch (error) {
-          node.file.viewedState = previousState;
-          toReviewProvider.refresh();
-          reviewedProvider.refresh();
-          mineProvider.refresh();
-          void vscode.window.showErrorMessage(vscode.l10n.t("Updating the viewed state failed: {0}", toErrorMessage(error)));
-        }
-      })();
+  const sidebarActions: ISidebarActions = {
+    loadFiles: loadPrFiles,
+    getLayout: getFilesLayout,
+    onSignIn: () => void vscode.commands.executeCommand("githubControlCenter.signIn"),
+    onOpenPrDetails: (pr) => void detailsSession.openPrDetails(pr),
+    onOpenPrExternal: (pr) => openPr(pr.url),
+    onCheckoutPr: (pr) => void checkoutBranch(pr.repo, pr.headRefName),
+    onOpenFileDiff: (node) => void openFileDiff(node),
+    onToggleFileViewed: async (node, viewed) => {
+      await setFileViewed(await requireToken(), node.pr.id, node.file.path, viewed);
+    },
+    onError: (message) => void vscode.window.showErrorMessage(message),
+  };
+
+  const toReviewProvider = new PrSidebarViewProvider("toReview", sidebarActions);
+  const reviewedProvider = new PrSidebarViewProvider("reviewed", sidebarActions);
+  const mineProvider = new PrSidebarViewProvider("mine", sidebarActions);
+  const sidebarProviders = [toReviewProvider, reviewedProvider, mineProvider];
+  const sidebarViewOptions = { webviewOptions: { retainContextWhenHidden: true } };
+
+  function resolvePrTarget(target: unknown): IPullRequest | undefined {
+    if (!target || typeof target !== "object") {
+      return undefined;
     }
+    if ("pr" in target && target.pr && typeof target.pr === "object" && "id" in target.pr) {
+      return target.pr as IPullRequest;
+    }
+    const ctx = target as IWebviewContextTarget;
+    if (typeof ctx.prId === "string") {
+      for (const provider of sidebarProviders) {
+        const found = provider.findPr(ctx.prId);
+        if (found) {
+          return found;
+        }
+      }
+      return undefined;
+    }
+    if ("id" in target && "url" in target && "headRefName" in target) {
+      return target as IPullRequest;
+    }
+    return undefined;
+  }
+
+  function resolveFileNodeTarget(target: unknown): IFileNode | undefined {
+    if (!target || typeof target !== "object") {
+      return undefined;
+    }
+    if ("pr" in target && "file" in target) {
+      return target as IFileNode;
+    }
+    const ctx = target as IWebviewContextTarget;
+    if (typeof ctx.prId === "string" && typeof ctx.filePath === "string") {
+      for (const provider of sidebarProviders) {
+        const found = provider.findFileNode(ctx.prId, ctx.filePath);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return undefined;
   }
   const newPrTracker = new NewPrTracker();
   const reviewDecisionTracker = new ReviewDecisionTracker();
@@ -379,9 +416,9 @@ export function activate(context: vscode.ExtensionContext): void {
     };
   }
 
-  function openPr(target: string | TreeNode): void {
-    // string from the webview flow, TreeNode when invoked from the inline tree icon
-    const url = typeof target === "string" ? target : target.kind === "pr" ? target.pr.url : undefined;
+  function openPr(target: unknown): void {
+    // string from webview/toast flows, IPullRequest or webview/context payload from sidebar commands
+    const url = typeof target === "string" ? target : resolvePrTarget(target)?.url;
     if (url) {
       void vscode.env.openExternal(vscode.Uri.parse(url));
     }
@@ -593,7 +630,7 @@ export function activate(context: vscode.ExtensionContext): void {
       toReviewProvider.clear();
       reviewedProvider.clear();
       mineProvider.clear();
-      toReviewView.badge = undefined;
+      toReviewProvider.setBadge(undefined);
       return;
     }
     try {
@@ -624,9 +661,11 @@ export function activate(context: vscode.ExtensionContext): void {
         (config.get("badge.countToReview", true) ? visibleSnapshot.toReview.length + needsAttention.length : 0) +
         (config.get("badge.countMine", false) ? visibleSnapshot.mine.length : 0) +
         (config.get("badge.countReviewed", false) ? freshlyApproved.length : 0);
-      toReviewView.badge = badgeCount
-        ? { value: badgeCount, tooltip: vscode.l10n.t("{0} pull requests", badgeCount) }
-        : undefined;
+      toReviewProvider.setBadge(
+        badgeCount
+          ? { value: badgeCount, tooltip: vscode.l10n.t("{0} pull requests", badgeCount) }
+          : undefined,
+      );
       const notificationsEnabled = config.get("notifications.enabled", true);
       notifyNewPrs(visibleSnapshot.toReview, notificationsEnabled);
       notifyReviewDecisions(visibleSnapshot.mine, notificationsEnabled);
@@ -660,9 +699,9 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   context.subscriptions.push(
-    toReviewView,
-    reviewedView,
-    mineView,
+    vscode.window.registerWebviewViewProvider("githubControlCenter.toReview", toReviewProvider, sidebarViewOptions),
+    vscode.window.registerWebviewViewProvider("githubControlCenter.reviewed", reviewedProvider, sidebarViewOptions),
+    vscode.window.registerWebviewViewProvider("githubControlCenter.mine", mineProvider, sidebarViewOptions),
     output,
     { dispose: () => clearTimeout(pollTimer) },
     { dispose: () => detailsSession.dispose() },
@@ -680,34 +719,39 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("githubControlCenter.openPr", openPr),
     vscode.commands.registerCommand("githubControlCenter.openSettings", () => void vscode.commands.executeCommand("workbench.action.openSettings", "@ext:mts88.github-control-center")),
-    vscode.commands.registerCommand("githubControlCenter.copyPrUrl", (node: TreeNode) => {
-      if (node.kind === "pr") {
-        void vscode.env.clipboard.writeText(node.pr.url);
+    vscode.commands.registerCommand("githubControlCenter.copyPrUrl", (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (pr) {
+        void vscode.env.clipboard.writeText(pr.url);
       }
     }),
-    vscode.commands.registerCommand("githubControlCenter.copyBranchName", (node: TreeNode) => {
-      if (node.kind === "pr") {
-        void vscode.env.clipboard.writeText(node.pr.headRefName);
+    vscode.commands.registerCommand("githubControlCenter.copyBranchName", (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (pr) {
+        void vscode.env.clipboard.writeText(pr.headRefName);
       }
     }),
-    vscode.commands.registerCommand("githubControlCenter.checkoutPr", (node: TreeNode) => {
-      if (node.kind === "pr") {
-        // fork PRs are not detectable from the tree row: the checkout simply fails with a clear git error
-        void checkoutBranch(node.pr.repo, node.pr.headRefName);
+    vscode.commands.registerCommand("githubControlCenter.checkoutPr", (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (pr) {
+        // fork PRs are not detectable from the row: the checkout simply fails with a clear git error
+        void checkoutBranch(pr.repo, pr.headRefName);
       }
     }),
-    vscode.commands.registerCommand("githubControlCenter.muteRepo", async (node: TreeNode) => {
-      if (node.kind !== "pr") {
+    vscode.commands.registerCommand("githubControlCenter.muteRepo", async (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (!pr) {
         return;
       }
-      await addMutedEntry(node.pr.repo);
-      void vscode.window.showInformationMessage(vscode.l10n.t("Muted {0}", node.pr.repo));
+      await addMutedEntry(pr.repo);
+      void vscode.window.showInformationMessage(vscode.l10n.t("Muted {0}", pr.repo));
     }),
-    vscode.commands.registerCommand("githubControlCenter.muteOrg", async (node: TreeNode) => {
-      if (node.kind !== "pr") {
+    vscode.commands.registerCommand("githubControlCenter.muteOrg", async (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (!pr) {
         return;
       }
-      const organization = node.pr.repo.split("/")[0];
+      const organization = pr.repo.split("/")[0];
       await addMutedEntry(organization);
       void vscode.window.showInformationMessage(vscode.l10n.t("Muted everything from {0}", organization));
     }),
@@ -716,10 +760,25 @@ export function activate(context: vscode.ExtensionContext): void {
       detailsSession.clearBriefCache();
       void vscode.window.showInformationMessage(vscode.l10n.t("AI brief cache cleared."));
     }),
-    vscode.commands.registerCommand("githubControlCenter.openPrDetails", (pr: IPullRequest) => void detailsSession.openPrDetails(pr)),
+    vscode.commands.registerCommand("githubControlCenter.openPrDetails", (target: unknown) => {
+      const pr = resolvePrTarget(target);
+      if (pr) {
+        void detailsSession.openPrDetails(pr);
+      }
+    }),
     vscode.workspace.registerTextDocumentContentProvider(PR_URI_SCHEME, contentProvider),
-    vscode.commands.registerCommand("githubControlCenter.openFileDiff", (node: IFileNode) => void openFileDiff(node)),
-    vscode.commands.registerCommand("githubControlCenter.openTextDiff", (node: IFileNode) => void openFileDiff(node, true)),
+    vscode.commands.registerCommand("githubControlCenter.openFileDiff", (target: unknown) => {
+      const node = resolveFileNodeTarget(target);
+      if (node) {
+        void openFileDiff(node);
+      }
+    }),
+    vscode.commands.registerCommand("githubControlCenter.openTextDiff", (target: unknown) => {
+      const node = resolveFileNodeTarget(target);
+      if (node) {
+        void openFileDiff(node, true);
+      }
+    }),
     vscode.commands.registerCommand("githubControlCenter.review.resolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Resolve conversation"), resolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.unresolveThread", (thread: vscode.CommentThread) => void runThreadMutation(thread, vscode.l10n.t("Unresolve conversation"), unresolveThread)),
     vscode.commands.registerCommand("githubControlCenter.review.addComment", (reply: vscode.CommentReply) => void handleAddComment(reply, false)),
@@ -739,9 +798,6 @@ export function activate(context: vscode.ExtensionContext): void {
     reviewController,
     imagePreview,
     pendingStatusBar,
-    toReviewView.onDidChangeCheckboxState(handleCheckboxChange),
-    reviewedView.onDidChangeCheckboxState(handleCheckboxChange),
-    mineView.onDidChangeCheckboxState(handleCheckboxChange),
     { dispose: () => detailsPanel.dispose() },
     vscode.authentication.onDidChangeSessions((event) => {
       if (event.provider.id === "github") {
@@ -769,6 +825,9 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
       publishFilesLayoutContext();
+      for (const provider of sidebarProviders) {
+        provider.refresh();
+      }
       void refresh();
     }),
   );

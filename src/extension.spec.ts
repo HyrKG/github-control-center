@@ -10,6 +10,7 @@ vi.mock("./github/github", async (importOriginal) => ({
   getSession: vi.fn().mockResolvedValue({ accessToken: "token" }),
   fetchPullRequests: vi.fn(),
   fetchPrDetails: vi.fn(),
+  fetchPrFiles: vi.fn().mockResolvedValue([]),
   fetchFileBytes: vi.fn(),
   fetchPrFilePatches: vi.fn().mockResolvedValue([]),
   fetchReviewThreads: vi.fn(),
@@ -36,15 +37,19 @@ interface IMockWebviewPanel {
 const host = vi.hoisted(() => {
   const subscription = { dispose: vi.fn() };
   const registered = new Map<string, (...args: unknown[]) => unknown>();
+  const webviewViewProviders = new Map<string, vscode.WebviewViewProvider>();
   const statusBar = { ...subscription, hide: vi.fn(), show: vi.fn(), text: "", tooltip: "" };
   const webviewPanels: IMockWebviewPanel[] = [];
   const globalStateStore = new Map<string, unknown>();
+  const clipboardWriteText = vi.fn();
 
   return {
     registered,
+    webviewViewProviders,
     statusBar,
     webviewPanels,
     globalStateStore,
+    clipboardWriteText,
     external: vi.fn(),
     createCommentThread: vi.fn(() => ({ ...subscription })),
     commands: {
@@ -55,7 +60,7 @@ const host = vi.hoisted(() => {
       executeCommand: vi.fn(async (id: string) => registered.get(id)?.()),
     },
     workspace: {
-      getConfiguration: () => ({ get: <T>(_: string, fallback: T) => fallback }),
+      getConfiguration: () => ({ get: <T>(_: string, fallback: T) => fallback, update: vi.fn().mockResolvedValue(undefined) }),
       onDidChangeConfiguration: () => subscription,
       registerTextDocumentContentProvider: () => subscription,
     },
@@ -63,7 +68,10 @@ const host = vi.hoisted(() => {
       state: { focused: false },
       createOutputChannel: () => ({ ...subscription, appendLine: vi.fn() }),
       createStatusBarItem: () => statusBar,
-      createTreeView: () => ({ ...subscription, onDidChangeCheckboxState: () => subscription }),
+      registerWebviewViewProvider: vi.fn((viewId: string, provider: vscode.WebviewViewProvider) => {
+        webviewViewProviders.set(viewId, provider);
+        return subscription;
+      }),
       createWebviewPanel: vi.fn((viewType: string, title: string) => {
         let onMessage: ((message: unknown) => void) | undefined;
         let onDispose: (() => void) | undefined;
@@ -104,7 +112,11 @@ vi.mock("vscode", async (importOriginal) => {
   const original = await importOriginal<typeof vscode>();
   return {
     ...original,
-    env: { get language() { return original.env.language; }, openExternal: host.external },
+    env: {
+      get language() { return original.env.language; },
+      openExternal: host.external,
+      clipboard: { writeText: host.clipboardWriteText },
+    },
     comments: { createCommentController: () => ({ createCommentThread: host.createCommentThread, dispose: vi.fn() }) },
     commands: host.commands,
     workspace: host.workspace,
@@ -137,6 +149,8 @@ const pr: IPullRequest = {
   headRefName: "feature",
   baseRefOid: "base-oid",
   headRefOid: "head-oid",
+  additions: 12,
+  deletions: 3,
 };
 
 const snapshot: IReviewThreadsSnapshot = {
@@ -198,6 +212,7 @@ describe("localized extension actions", () => {
   afterEach(() => {
     subscriptions.splice(0).forEach((subscription) => subscription.dispose());
     host.registered.clear();
+    host.webviewViewProviders.clear();
     setTestLocale();
   });
 
@@ -342,5 +357,69 @@ describe("localized extension actions", () => {
     expect(detailsPanel.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
     expect(previewPanelA.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
     expect(previewPanelB.webview.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "pixelated", value: true });
+  });
+
+  it("registers all three sidebar webview views, caches the toReview badge until resolve, and resolves webview/context commands", async () => {
+    expect([...host.webviewViewProviders.keys()]).toEqual([
+      "githubControlCenter.toReview",
+      "githubControlCenter.reviewed",
+      "githubControlCenter.mine",
+    ]);
+
+    vi.mocked(github.fetchPullRequests).mockResolvedValueOnce({ toReview: [pr], mine: [], reviewed: [] });
+    vi.mocked(github.fetchPrFiles).mockResolvedValueOnce([
+      { path: "src/app.ts", changeType: "MODIFIED", additions: 12, deletions: 3, viewedState: "UNVIEWED" },
+    ]);
+    await runCommand("refresh");
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Resolve the toReview WebviewView AFTER poll already set the badge
+    let onMessage: ((message: unknown) => void) | undefined;
+    const mockView = {
+      badge: undefined as vscode.ViewBadge | undefined,
+      onDidDispose: () => ({ dispose: vi.fn() }),
+      webview: {
+        options: {},
+        html: "",
+        postMessage: vi.fn().mockResolvedValue(true),
+        onDidReceiveMessage: (cb: (message: unknown) => void) => {
+          onMessage = cb;
+          return { dispose: vi.fn() };
+        },
+      },
+    };
+    const toReviewProvider = host.webviewViewProviders.get("githubControlCenter.toReview")!;
+    toReviewProvider.resolveWebviewView(mockView as unknown as vscode.WebviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    expect(mockView.badge).toEqual({ value: 1, tooltip: "1 个拉取请求" });
+
+    // Trigger webview/context commands with { prId }
+    await runCommand("copyPrUrl", { webviewSection: "pr", prId: pr.id, preventDefaultContextMenuItems: true });
+    expect(host.clipboardWriteText).toHaveBeenCalledWith(pr.url);
+
+    await runCommand("copyBranchName", { webviewSection: "pr", prId: pr.id, preventDefaultContextMenuItems: true });
+    expect(host.clipboardWriteText).toHaveBeenCalledWith(pr.headRefName);
+
+    await runCommand("openPr", { webviewSection: "pr", prId: pr.id, preventDefaultContextMenuItems: true });
+    expect(host.external).toHaveBeenCalledWith(expect.objectContaining({ scheme: "https", path: "/acme/repo/pull/42" }));
+
+    // Expand PR in webview to load files, then run openTextDiff from webview/context { prId, filePath }
+    onMessage?.({ command: "ready" });
+    onMessage?.({ command: "togglePrExpand", prId: pr.id });
+    await vi.waitFor(() => expect(github.fetchPrFiles).toHaveBeenCalledWith("token", pr.id));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    host.commands.executeCommand.mockClear();
+    await runCommand("openTextDiff", { webviewSection: "prFile", prId: pr.id, filePath: "src/app.ts", preventDefaultContextMenuItems: true });
+    await vi.waitFor(() => {
+      expect(host.commands.executeCommand).toHaveBeenCalledWith(
+        "vscode.diff",
+        expect.objectContaining({ scheme: "ghcc-pr" }),
+        expect.objectContaining({ scheme: "ghcc-pr" }),
+        "app.ts（拉取请求 #42）",
+        { preview: true },
+      );
+    });
   });
 });

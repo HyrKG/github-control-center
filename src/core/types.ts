@@ -23,6 +23,8 @@ export interface IPullRequest {
   headRepo?: string;
   baseRefOid: string;
   headRefOid: string;
+  additions: number;
+  deletions: number;
 }
 
 export type FileChangeType = "ADDED" | "MODIFIED" | "DELETED" | "RENAMED" | "COPIED" | "CHANGED";

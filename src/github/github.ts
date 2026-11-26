@@ -41,6 +41,8 @@ const PR_FIELDS = `
     headRefName
     baseRefOid
     headRefOid
+    additions
+    deletions
     headRepository { nameWithOwner }
     author { login }
     repository { nameWithOwner }
@@ -74,6 +76,8 @@ interface IGraphQlPrNode {
   headRefName: string;
   baseRefOid: string;
   headRefOid: string;
+  additions?: number;
+  deletions?: number;
   headRepository?: { nameWithOwner: string } | null;
   author: { login: string } | null;
   repository: { nameWithOwner: string };
@@ -768,6 +772,8 @@ function toPullRequest(node: IGraphQlPrNode & { id: string }): IPullRequest {
     headRefName: node.headRefName,
     baseRefOid: node.baseRefOid,
     headRefOid: node.headRefOid,
+    additions: node.additions ?? 0,
+    deletions: node.deletions ?? 0,
   };
 }
 

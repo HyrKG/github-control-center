@@ -1,0 +1,349 @@
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import type * as vscode from "vscode";
+import { chineseBundle, setTestLocale } from "../core/localizationTestUtils";
+import type { CiState, IPrFile, IPullRequest } from "../core/types";
+import type { ISidebarSnapshot } from "./PrSidebarHtml";
+import { PrSidebarViewProvider, type FilesLayout, type ISidebarActions } from "./PrSidebarViewProvider";
+
+interface IPrOverrides {
+  id?: string;
+  number?: number;
+  title?: string;
+  repo?: string;
+  isDraft?: boolean;
+  ciState?: CiState;
+  createdAt?: string;
+  reviewDecision?: string | null;
+  viewerReviewState?: string | null;
+  isViewerApprovalStale?: boolean;
+  isReviewedByMe?: boolean;
+  headRefOid?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+function buildPr(overrides: IPrOverrides = {}): IPullRequest {
+  return {
+    id: overrides.id ?? "PR_1",
+    number: overrides.number ?? 1,
+    title: overrides.title ?? "A title",
+    url: "https://github.com/acme/repo/pull/1",
+    repo: overrides.repo ?? "acme/repo",
+    author: "jane",
+    isDraft: overrides.isDraft ?? false,
+    createdAt: overrides.createdAt ?? "2026-07-01T00:00:00Z",
+    ciState: overrides.ciState ?? "NONE",
+    reviewDecision: overrides.reviewDecision ?? null,
+    viewerReviewState: overrides.viewerReviewState ?? null,
+    isViewerApprovalStale: overrides.isViewerApprovalStale ?? false,
+    isReviewedByMe: overrides.isReviewedByMe,
+    headRefName: "feature/thing",
+    baseRefOid: "base-oid",
+    headRefOid: overrides.headRefOid ?? "head-oid",
+    additions: overrides.additions ?? 15,
+    deletions: overrides.deletions ?? 4,
+  };
+}
+
+function buildFile(overrides: Partial<IPrFile> = {}): IPrFile {
+  return {
+    path: overrides.path ?? "src/app.ts",
+    changeType: overrides.changeType ?? "MODIFIED",
+    additions: overrides.additions ?? 10,
+    deletions: overrides.deletions ?? 2,
+    viewedState: overrides.viewedState ?? "UNVIEWED",
+  };
+}
+
+interface IMockWebviewView {
+  badge?: vscode.ViewBadge;
+  htmlWrites: number;
+  webview: {
+    options: vscode.WebviewOptions;
+    html: string;
+    postMessage: Mock<(message: unknown) => Promise<boolean>>;
+    onDidReceiveMessage: (cb: (message: unknown) => void) => { dispose: () => void };
+    emitMessage: (message: unknown) => void;
+  };
+  onDidDispose: (cb: () => void) => { dispose: () => void };
+  dispose: () => void;
+}
+
+function createMockWebviewView(): IMockWebviewView {
+  let htmlValue = "";
+  let onMessage: ((message: unknown) => void) | undefined;
+  let onDispose: (() => void) | undefined;
+  const mock: IMockWebviewView = {
+    badge: undefined,
+    htmlWrites: 0,
+    webview: {
+      options: {},
+      get html() {
+        return htmlValue;
+      },
+      set html(value: string) {
+        htmlValue = value;
+        mock.htmlWrites += 1;
+      },
+      postMessage: vi.fn().mockResolvedValue(true),
+      onDidReceiveMessage: (cb) => {
+        onMessage = cb;
+        return { dispose: vi.fn() };
+      },
+      emitMessage: (message) => onMessage?.(message),
+    },
+    onDidDispose: (cb) => {
+      onDispose = cb;
+      return { dispose: vi.fn() };
+    },
+    dispose: () => onDispose?.(),
+  };
+  return mock;
+}
+
+function lastPostedSnapshot(view: IMockWebviewView): ISidebarSnapshot {
+  const calls = view.webview.postMessage.mock.calls;
+  const last = [...calls].reverse().find(([payload]) => (payload as { command?: string })?.command === "state")?.[0] as
+    | { command: string; snapshot: ISidebarSnapshot }
+    | undefined;
+  expect(last?.command).toBe("state");
+  return last!.snapshot;
+}
+
+describe("PrSidebarViewProvider", () => {
+  let layout: FilesLayout;
+  let actions: ISidebarActions & {
+    loadFiles: Mock<(pr: IPullRequest) => Promise<IPrFile[]>>;
+    onSignIn: Mock<() => void>;
+    onOpenPrDetails: Mock<(pr: IPullRequest) => void>;
+    onOpenPrExternal: Mock<(pr: IPullRequest) => void>;
+    onCheckoutPr: Mock<(pr: IPullRequest) => void>;
+    onOpenFileDiff: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }) => void>;
+    onToggleFileViewed: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }, viewed: boolean) => Promise<void>>;
+    onError: Mock<(message: string) => void>;
+  };
+  let provider: PrSidebarViewProvider;
+
+  beforeEach(() => {
+    layout = "tree";
+    actions = {
+      loadFiles: vi.fn(async () => [buildFile()]),
+      getLayout: () => layout,
+      onSignIn: vi.fn(),
+      onOpenPrDetails: vi.fn(),
+      onOpenPrExternal: vi.fn(),
+      onCheckoutPr: vi.fn(),
+      onOpenFileDiff: vi.fn(),
+      onToggleFileViewed: vi.fn().mockResolvedValue(undefined),
+      onError: vi.fn(),
+    };
+    provider = new PrSidebarViewProvider("toReview", actions);
+  });
+
+  afterEach(() => {
+    setTestLocale();
+  });
+
+  it("caches badge set before resolveWebviewView and updates it live after resolve", () => {
+    provider.setBadge({ value: 5, tooltip: "5 pull requests" });
+    const view = createMockWebviewView();
+
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    expect(view.badge).toEqual({ value: 5, tooltip: "5 pull requests" });
+
+    provider.setBadge({ value: 2, tooltip: "2 pull requests" });
+    expect(view.badge).toEqual({ value: 2, tooltip: "2 pull requests" });
+
+    provider.setBadge(undefined);
+    expect(view.badge).toBeUndefined();
+  });
+
+  it("writes webview.html only once on resolve and syncs all updates via postMessage after ready", async () => {
+    const view = createMockWebviewView();
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    expect(view.htmlWrites).toBe(1);
+
+    // Updates before ready are not posted yet
+    provider.setPrs([buildPr()]);
+    expect(view.webview.postMessage).not.toHaveBeenCalled();
+
+    // Ready handshake delivers current snapshot
+    view.webview.emitMessage({ command: "ready" });
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+    expect(lastPostedSnapshot(view).groups).toHaveLength(1);
+
+    // Subsequent updates never rewrite webview.html
+    provider.setPrs([buildPr({ id: "PR_2", number: 2 })]);
+    layout = "flat";
+    provider.refresh();
+    provider.clear();
+    expect(view.htmlWrites).toBe(1);
+    expect(lastPostedSnapshot(view).signedIn).toBe(false);
+  });
+
+  it("localizes welcome/empty strings per view kind and tooltips in English and Simplified Chinese", () => {
+    setTestLocale("zh-cn", chineseBundle());
+    const reviewedView = createMockWebviewView();
+    const reviewedProvider = new PrSidebarViewProvider("reviewed", actions);
+    reviewedProvider.resolveWebviewView(reviewedView as unknown as vscode.WebviewView);
+    expect(reviewedView.webview.html).toContain("登录 GitHub 后即可查看你已批准的拉取请求。");
+    expect(reviewedView.webview.html).toContain("暂无已批准的拉取请求");
+
+    const mineView = createMockWebviewView();
+    const mineProvider = new PrSidebarViewProvider("mine", actions);
+    mineProvider.resolveWebviewView(mineView as unknown as vscode.WebviewView);
+    expect(mineView.webview.html).toContain("登录 GitHub 后即可查看你尚未关闭的拉取请求。");
+    expect(mineView.webview.html).toContain("你没有尚未关闭的拉取请求。");
+
+    const pr = buildPr({
+      createdAt: new Date().toISOString(),
+      ciState: "SUCCESS",
+      reviewDecision: "APPROVED",
+      viewerReviewState: "APPROVED",
+      isReviewedByMe: true,
+    });
+    provider.setPrs([pr]);
+    const snap = provider.buildSnapshot();
+    expect(snap.groups[0].prs[0].meta).toContain("今天创建");
+    expect(snap.groups[0].prs[0].meta).toContain("✓ 你已批准");
+    expect(snap.groups[0].prs[0].tooltip).toContain("持续集成：通过");
+    expect(snap.groups[0].prs[0].tooltip).toContain("审查：已批准");
+  });
+
+  it("groups PRs alphabetically by repo and maps review glyphs, stale approvals, and additions/deletions", () => {
+    provider.setPrs([
+      buildPr({ id: "1", repo: "acme/zeta", reviewDecision: "APPROVED", viewerReviewState: "APPROVED", additions: 1200, deletions: 34 }),
+      buildPr({ id: "2", repo: "acme/alpha", reviewDecision: "APPROVED", viewerReviewState: "APPROVED", isViewerApprovalStale: true, isReviewedByMe: true }),
+      buildPr({ id: "3", repo: "acme/zeta", reviewDecision: "CHANGES_REQUESTED" }),
+    ]);
+
+    const snap = provider.buildSnapshot();
+    expect(snap.groups.map((g) => g.repo)).toEqual(["acme/alpha", "acme/zeta"]);
+    expect(snap.groups[0].prs[0]).toMatchObject({ reviewGlyph: "☑", reviewTone: "approved" });
+    expect(snap.groups[0].prs[0].meta).toContain("● review stale");
+    expect(snap.groups[1].prs[0]).toMatchObject({ reviewGlyph: "✓", reviewTone: "approved", additions: 1200, deletions: 34 });
+    expect(snap.groups[1].prs[1]).toMatchObject({ reviewGlyph: "↻", reviewTone: "changes" });
+  });
+
+  it("lazily loads PR files on expand, supports retry on failure, and silently refreshes on headRefOid change", async () => {
+    const view = createMockWebviewView();
+    const pr = buildPr({ id: "PR_1", headRefOid: "oid-1" });
+    provider.setPrs([pr]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+
+    // No file load before expand
+    expect(actions.loadFiles).not.toHaveBeenCalled();
+
+    // First expand fails -> error state shown
+    actions.loadFiles.mockRejectedValueOnce(new Error("boom"));
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    await vi.waitFor(() => {
+      expect(lastPostedSnapshot(view).groups[0].prs[0].filesState).toEqual({
+        status: "error",
+        message: "Failed to load files: boom",
+      });
+    });
+
+    // Retry succeeds -> files loaded in tree layout
+    actions.loadFiles.mockResolvedValueOnce([buildFile({ path: "src/sub/a.ts", additions: 3, deletions: 7 })]);
+    view.webview.emitMessage({ command: "retryLoadFiles", prId: "PR_1" });
+    await vi.waitFor(() => {
+      const state = lastPostedSnapshot(view).groups[0].prs[0].filesState;
+      expect(state.status).toBe("loaded");
+      if (state.status === "loaded") {
+        expect(state.folders[0]).toMatchObject({ name: "src/sub", path: "src/sub" });
+        expect(state.folders[0].files[0]).toMatchObject({ path: "src/sub/a.ts", additions: 3, deletions: 7 });
+      }
+    });
+
+    // Collapsing & re-expanding same headRefOid reuses loaded files without extra loadFiles call
+    actions.loadFiles.mockClear();
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    expect(lastPostedSnapshot(view).groups[0].prs[0].expanded).toBe(false);
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    expect(lastPostedSnapshot(view).groups[0].prs[0].expanded).toBe(true);
+    expect(actions.loadFiles).not.toHaveBeenCalled();
+
+    // Poll brings a new headRefOid -> silent background refresh updates files without flashing loading state
+    const refreshedFile = buildFile({ path: "src/sub/b.ts", additions: 99, deletions: 0 });
+    actions.loadFiles.mockResolvedValueOnce([refreshedFile]);
+    view.webview.postMessage.mockClear();
+    provider.setPrs([buildPr({ id: "PR_1", headRefOid: "oid-2" })]);
+    await vi.waitFor(() => {
+      const state = lastPostedSnapshot(view).groups[0].prs[0].filesState;
+      expect(state.status).toBe("loaded");
+      if (state.status === "loaded") {
+        expect(state.folders[0].files[0].path).toBe("src/sub/b.ts");
+      }
+    });
+    // Verify no "loading" state was posted during silent refresh
+    const postedStatuses = view.webview.postMessage.mock.calls.map(
+      ([msg]) => (msg as { snapshot: ISidebarSnapshot }).snapshot.groups[0].prs[0].filesState.status,
+    );
+    expect(postedStatuses).not.toContain("loading");
+  });
+
+  it("optimistically updates viewed state and rolls back with an error toast on failure", async () => {
+    const view = createMockWebviewView();
+    const file = buildFile({ path: "src/app.ts", viewedState: "UNVIEWED" });
+    actions.loadFiles.mockResolvedValueOnce([file]);
+    provider.setPrs([buildPr()]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    await vi.waitFor(() => expect(provider.findFileNode("PR_1", "src/app.ts")).toBeDefined());
+
+    let rejectMutation!: (error: Error) => void;
+    actions.onToggleFileViewed.mockImplementationOnce(
+      () => new Promise<void>((_, reject) => { rejectMutation = reject; }),
+    );
+
+    view.webview.emitMessage({ command: "toggleFileViewed", prId: "PR_1", filePath: "src/app.ts", viewed: true });
+    // Immediately reflected optimistically
+    expect(file.viewedState).toBe("VIEWED");
+    expect(lastPostedSnapshot(view).groups[0].prs[0].filesState).toMatchObject({
+      status: "loaded",
+      folders: [{ files: [{ path: "src/app.ts", viewed: true }] }],
+    });
+
+    // Reject -> rolls back state, re-posts snapshot, and surfaces error
+    rejectMutation(new Error("network down"));
+    await vi.waitFor(() => expect(actions.onError).toHaveBeenCalledWith("Updating the viewed state failed: network down"));
+    expect(file.viewedState).toBe("UNVIEWED");
+    expect(lastPostedSnapshot(view).groups[0].prs[0].filesState).toMatchObject({
+      status: "loaded",
+      folders: [{ files: [{ path: "src/app.ts", viewed: false }] }],
+    });
+  });
+
+  it("dispatches signIn, PR actions, and openFileDiff messages and stops posting after dispose", async () => {
+    const view = createMockWebviewView();
+    const pr = buildPr();
+    const file = buildFile();
+    actions.loadFiles.mockResolvedValueOnce([file]);
+    provider.setPrs([pr]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    view.webview.emitMessage({ command: "togglePrExpand", prId: pr.id });
+    await vi.waitFor(() => expect(provider.findFileNode(pr.id, file.path)).toBeDefined());
+
+    view.webview.emitMessage({ command: "signIn" });
+    view.webview.emitMessage({ command: "openPrDetails", prId: pr.id });
+    view.webview.emitMessage({ command: "openPrExternal", prId: pr.id });
+    view.webview.emitMessage({ command: "checkoutPr", prId: pr.id });
+    view.webview.emitMessage({ command: "openFileDiff", prId: pr.id, filePath: file.path });
+
+    expect(actions.onSignIn).toHaveBeenCalledOnce();
+    expect(actions.onOpenPrDetails).toHaveBeenCalledWith(pr);
+    expect(actions.onOpenPrExternal).toHaveBeenCalledWith(pr);
+    expect(actions.onCheckoutPr).toHaveBeenCalledWith(pr);
+    expect(actions.onOpenFileDiff).toHaveBeenCalledWith({ kind: "file", pr, file });
+
+    view.webview.postMessage.mockClear();
+    view.dispose();
+    provider.refresh();
+    expect(view.webview.postMessage).not.toHaveBeenCalled();
+  });
+});

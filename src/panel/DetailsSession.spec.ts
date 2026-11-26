@@ -26,6 +26,8 @@ function buildPr(overrides: Partial<IPullRequest> = {}): IPullRequest {
     headRefName: "feature",
     baseRefOid: "base-oid",
     headRefOid: "head-oid",
+    additions: 10,
+    deletions: 2,
     ...overrides,
   };
 }
