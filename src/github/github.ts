@@ -274,6 +274,7 @@ interface IGraphQlDetailsNode {
 
 interface IGraphQlError {
   message: string;
+  type?: string;
   path?: ReadonlyArray<string | number>;
 }
 
@@ -282,20 +283,29 @@ interface IGraphQlPayload<TData> {
   errors?: IGraphQlError[];
 }
 
-interface IGraphQlOptions {
-  ignorableErrorPaths?: ReadonlyArray<ReadonlyArray<string | number>>;
+interface IGraphQlIgnorableError {
+  path: ReadonlyArray<string | number>;
+  type: string;
+}
+
+interface IGraphQlOptions<TData> {
+  ignorableErrors?: ReadonlyArray<IGraphQlIgnorableError>;
+  canIgnorePartialErrors?: (data: TData) => boolean;
 }
 
 function isIgnorableGraphQlError(
   error: IGraphQlError,
-  ignorablePaths: ReadonlyArray<ReadonlyArray<string | number>>,
+  ignorableErrors: ReadonlyArray<IGraphQlIgnorableError>,
 ): boolean {
-  const { path } = error;
-  if (!path?.length) {
+  const { path, type } = error;
+  if (!path?.length || !type) {
     return false;
   }
-  return ignorablePaths.some(
-    (prefix) => prefix.length > 0 && path.length >= prefix.length && prefix.every((segment, index) => path[index] === segment),
+  return ignorableErrors.some(
+    (allowed) =>
+      allowed.type === type &&
+      path.length === allowed.path.length &&
+      allowed.path.every((segment, index) => path[index] === segment),
   );
 }
 
@@ -309,7 +319,7 @@ async function postGraphQl<TData>(
   token: string,
   query: string,
   variables?: Record<string, unknown>,
-  options?: IGraphQlOptions,
+  options?: IGraphQlOptions<TData>,
 ): Promise<TData> {
   let payload: IGraphQlPayload<TData>;
   try {
@@ -341,11 +351,14 @@ async function postGraphQl<TData>(
   }
 
   if (payload.errors?.length) {
-    const ignorablePaths = options?.ignorableErrorPaths;
-    const firstBlockingError =
-      payload.data && ignorablePaths?.length
-        ? payload.errors.find((error) => !isIgnorableGraphQlError(error, ignorablePaths))
-        : payload.errors[0];
+    const ignorableErrors = options?.ignorableErrors;
+    const canIgnore =
+      Boolean(payload.data) &&
+      Boolean(ignorableErrors?.length) &&
+      (options?.canIgnorePartialErrors ? options.canIgnorePartialErrors(payload.data as TData) : true);
+    const firstBlockingError = canIgnore
+      ? payload.errors.find((error) => !isIgnorableGraphQlError(error, ignorableErrors!))
+      : payload.errors[0];
     if (firstBlockingError) {
       throw new Error(firstBlockingError.message);
     }
@@ -489,7 +502,10 @@ export async function fetchPrDetails(token: string, prId: string, headRef: strin
       id: prId,
       headRef,
     },
-    { ignorableErrorPaths: [["node", "baseRef", "compare"]] },
+    {
+      ignorableErrors: [{ path: ["node", "baseRef", "compare"], type: "NOT_FOUND" }],
+      canIgnorePartialErrors: (payloadData) => Boolean(payloadData.node),
+    },
   );
   if (!data.node) {
     throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
@@ -874,8 +890,9 @@ function toPrDetails(node: IGraphQlDetailsNode, viewerLogin: string): IPrDetails
     headRepo: node.headRepository?.nameWithOwner ?? node.repository.nameWithOwner,
     headRefOid: node.headRefOid,
     // Ref.compare works without branch protection; mergeStateStatus only reports BEHIND with strict protection.
-    // compare(headRef:) resolves the name inside the BASE repo, so on a cross-fork PR a same-named
-    // base-repo branch would be compared instead — skip the check entirely for forks.
+    // The query passes refs/pull/<number>/head (present on the base repo for both same-repo and fork PRs,
+    // without colliding with same-named base branches or lagging behind cached list SHAs). Still gate on
+    // isSameRepoPr so external reviewers without push access don't see an unusable Update branch button on forks.
     isBehindBase: isSameRepoPr(node) && (node.baseRef?.compare?.behindBy ?? 0) > 0,
     commitsCount: node.commits.totalCount,
     changedFiles: node.changedFiles,

@@ -150,7 +150,7 @@ export class DetailsSession {
     }
     const refreshId = ++this.detailsRefreshSequence;
     try {
-      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefOid);
+      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, `refs/pull/${pr.number}/head`);
       if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
@@ -206,7 +206,7 @@ export class DetailsSession {
         this.detailsCache.clear();
       }
       this.activeSessionKey = nextSessionKey;
-      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefOid);
+      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, `refs/pull/${pr.number}/head`);
       if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }

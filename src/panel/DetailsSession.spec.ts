@@ -158,9 +158,10 @@ describe("DetailsSession", () => {
     );
   });
 
-  it("passes headRefOid rather than headRefName to fetchPrDetails on open and refresh", async () => {
+  it("passes refs/pull/<number>/head rather than headRefName or stale headRefOid on open, refresh, and post-updateBranch reopen", async () => {
     const pr = buildPr({
       id: "PR_FORK",
+      number: 17101,
       headRefName: "fix-virtualizer-detached-row-leak",
       headRefOid: "0123456789abcdef0123456789abcdef01234567",
     });
@@ -168,11 +169,19 @@ describe("DetailsSession", () => {
     const session = new DetailsSession(deps);
     try {
       await session.openPrDetails(pr);
-      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, pr.headRefOid);
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
 
       deps.fetchPrDetails.mockClear();
       await session.refreshOpenDetails();
-      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, pr.headRefOid);
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
+
+      // After updateBranch, runPrMutation immediately reopens details using the same `pr` object
+      // whose headRefOid is still stale until the background search refresh catches up.
+      deps.fetchPrDetails.mockClear();
+      session.handleMessage({ command: "updateBranch", method: "REBASE" });
+      await flush();
+      expect(deps.updatePrBranch).toHaveBeenCalledExactlyOnceWith("token", pr.id, "REBASE");
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
     } finally {
       session.dispose();
     }
