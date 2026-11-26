@@ -881,13 +881,86 @@ describe("fetchPrDetails", () => {
     expect(details.isBehindBase).toBe(false);
   });
 
-  it("should send the head ref name as a query variable", async () => {
-    stubFetch({ data: { viewer: { login: "jane" }, node: buildDetailsNode() } });
+  it("should ignore partial GraphQL errors under node.baseRef.compare when data is present", async () => {
+    stubFetch({
+      data: {
+        viewer: { login: "jane" },
+        node: buildDetailsNode({
+          headRepository: { nameWithOwner: "someone-else/repo" },
+          baseRef: { compare: null },
+        }),
+      },
+      errors: [
+        {
+          type: "NOT_FOUND",
+          path: ["node", "baseRef", "compare"],
+          message: "Could not resolve head ref 'fix-virtualizer-detached-row-leak'.",
+        },
+      ],
+    });
 
-    await fetchPrDetails("token", "PR_42", "feature/thing");
+    const details = await fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567");
+
+    expect(details.number).toBe(42);
+    expect(details.title).toBe("A title");
+    expect(details.isBehindBase).toBe(false);
+  });
+
+  it("should ignore nested GraphQL error paths under node.baseRef.compare when data is present", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ path: ["node", "baseRef", "compare", "behindBy"], message: "Comparison unavailable" }],
+    });
+
+    const details = await fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567");
+
+    expect(details.isBehindBase).toBe(false);
+  });
+
+  it("should throw the first non-ignorable error when errors include another path alongside compare", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [
+        { path: ["node", "baseRef", "compare"], message: "Could not resolve head ref 'fix-virtualizer-detached-row-leak'." },
+        { path: ["node", "reviews"], message: "Reviews unavailable" },
+      ],
+    });
+
+    await expect(fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567")).rejects.toThrow("Reviews unavailable");
+  });
+
+  it("should throw when an error targets a parent path or has no path", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: null }) },
+      errors: [{ path: ["node", "baseRef"], message: "Base ref unavailable" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567")).rejects.toThrow("Base ref unavailable");
+
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ message: "Resource not accessible" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567")).rejects.toThrow("Resource not accessible");
+  });
+
+  it("should still throw an ignorable-path error when payload data is missing", async () => {
+    stubFetch({
+      errors: [{ path: ["node", "baseRef", "compare"], message: "Could not resolve head ref 'fix-virtualizer-detached-row-leak'." }],
+    });
+
+    await expect(fetchPrDetails("token", "PR_42", "0123456789abcdef0123456789abcdef01234567")).rejects.toThrow(
+      "Could not resolve head ref 'fix-virtualizer-detached-row-leak'.",
+    );
+  });
+
+  it("should send the head ref as a query variable", async () => {
+    stubFetch({ data: { viewer: { login: "jane" }, node: buildDetailsNode() } });
+    const headRefOid = "0123456789abcdef0123456789abcdef01234567";
+
+    await fetchPrDetails("token", "PR_42", headRefOid);
 
     const requestBody = JSON.parse((fetch as Mock).mock.calls[0][1].body as string);
-    expect(requestBody.variables).toEqual({ id: "PR_42", headRef: "feature/thing" });
+    expect(requestBody.variables).toEqual({ id: "PR_42", headRef: headRefOid });
   });
 
   it("should fall back to the base repo when headRepository is missing", async () => {

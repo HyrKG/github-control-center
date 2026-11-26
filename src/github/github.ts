@@ -272,9 +272,31 @@ interface IGraphQlDetailsNode {
   };
 }
 
+interface IGraphQlError {
+  message: string;
+  path?: ReadonlyArray<string | number>;
+}
+
 interface IGraphQlPayload<TData> {
   data?: TData;
-  errors?: Array<{ message: string }>;
+  errors?: IGraphQlError[];
+}
+
+interface IGraphQlOptions {
+  ignorableErrorPaths?: ReadonlyArray<ReadonlyArray<string | number>>;
+}
+
+function isIgnorableGraphQlError(
+  error: IGraphQlError,
+  ignorablePaths: ReadonlyArray<ReadonlyArray<string | number>>,
+): boolean {
+  const { path } = error;
+  if (!path?.length) {
+    return false;
+  }
+  return ignorablePaths.some(
+    (prefix) => prefix.length > 0 && path.length >= prefix.length && prefix.every((segment, index) => path[index] === segment),
+  );
 }
 
 export function getSession(createIfNone: boolean): Thenable<vscode.AuthenticationSession | undefined> {
@@ -283,7 +305,12 @@ export function getSession(createIfNone: boolean): Thenable<vscode.Authenticatio
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-async function postGraphQl<TData>(token: string, query: string, variables?: Record<string, unknown>): Promise<TData> {
+async function postGraphQl<TData>(
+  token: string,
+  query: string,
+  variables?: Record<string, unknown>,
+  options?: IGraphQlOptions,
+): Promise<TData> {
   let payload: IGraphQlPayload<TData>;
   try {
     const response = await fetch(GRAPHQL_ENDPOINT, {
@@ -314,7 +341,14 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
   }
 
   if (payload.errors?.length) {
-    throw new Error(payload.errors[0].message);
+    const ignorablePaths = options?.ignorableErrorPaths;
+    const firstBlockingError =
+      payload.data && ignorablePaths?.length
+        ? payload.errors.find((error) => !isIgnorableGraphQlError(error, ignorablePaths))
+        : payload.errors[0];
+    if (firstBlockingError) {
+      throw new Error(firstBlockingError.message);
+    }
   }
   if (!payload.data) {
     throw new LocalizedError("GitHub GraphQL response has no data", vscode.l10n.t("GitHub GraphQL response has no data"));
@@ -447,11 +481,16 @@ export async function fetchPullRequests(token: string): Promise<IPrSnapshot> {
   };
 }
 
-export async function fetchPrDetails(token: string, prId: string, headRefName: string): Promise<IPrDetails> {
-  const data = await postGraphQl<{ viewer: { login: string }; node: IGraphQlDetailsNode | null }>(token, DETAILS_QUERY, {
-    id: prId,
-    headRef: headRefName,
-  });
+export async function fetchPrDetails(token: string, prId: string, headRef: string): Promise<IPrDetails> {
+  const data = await postGraphQl<{ viewer: { login: string }; node: IGraphQlDetailsNode | null }>(
+    token,
+    DETAILS_QUERY,
+    {
+      id: prId,
+      headRef,
+    },
+    { ignorableErrorPaths: [["node", "baseRef", "compare"]] },
+  );
   if (!data.node) {
     throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
   }

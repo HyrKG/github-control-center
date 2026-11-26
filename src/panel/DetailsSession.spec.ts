@@ -158,6 +158,26 @@ describe("DetailsSession", () => {
     );
   });
 
+  it("passes headRefOid rather than headRefName to fetchPrDetails on open and refresh", async () => {
+    const pr = buildPr({
+      id: "PR_FORK",
+      headRefName: "fix-virtualizer-detached-row-leak",
+      headRefOid: "0123456789abcdef0123456789abcdef01234567",
+    });
+    const deps = buildDeps();
+    const session = new DetailsSession(deps);
+    try {
+      await session.openPrDetails(pr);
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, pr.headRefOid);
+
+      deps.fetchPrDetails.mockClear();
+      await session.refreshOpenDetails();
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, pr.headRefOid);
+    } finally {
+      session.dispose();
+    }
+  });
+
   describe("openPrDetails — stale-response guard", () => {
     it("keeps only the latest click's details, dropping a slower earlier fetch", async () => {
       const prA = buildPr({ id: "A" });

@@ -36,7 +36,7 @@ function toSessionKey(session: IAuthSessionLike): string {
 export interface IDetailsSessionDeps {
   panel: IDetailsSessionPanel;
   getSession(createIfNone: boolean): PromiseLike<IAuthSessionLike | undefined>;
-  fetchPrDetails(token: string, prId: string, headRefName: string): Promise<IPrDetails>;
+  fetchPrDetails(token: string, prId: string, headRef: string): Promise<IPrDetails>;
   fetchFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes>;
   loadPrFiles(pr: IPullRequest): Promise<IPrFile[]>;
   ensurePatches(pr: IPullRequest): Promise<Map<string, IPrFilePatch>>;
@@ -150,7 +150,7 @@ export class DetailsSession {
     }
     const refreshId = ++this.detailsRefreshSequence;
     try {
-      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
+      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefOid);
       if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
@@ -206,7 +206,7 @@ export class DetailsSession {
         this.detailsCache.clear();
       }
       this.activeSessionKey = nextSessionKey;
-      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
+      const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefOid);
       if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
