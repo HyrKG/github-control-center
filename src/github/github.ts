@@ -281,23 +281,38 @@ export function getSession(createIfNone: boolean): Thenable<vscode.Authenticatio
   return vscode.authentication.getSession(GITHUB_AUTH_PROVIDER, GITHUB_SCOPES, { createIfNone });
 }
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function postGraphQl<TData>(token: string, query: string, variables?: Record<string, unknown>): Promise<TData> {
-  const response = await fetch(GRAPHQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!response.ok) {
-    throw new LocalizedError(
-      `GitHub GraphQL request failed with status ${response.status}`,
-      vscode.l10n.t("GitHub GraphQL request failed with status {0}", response.status),
-    );
+  let payload: IGraphQlPayload<TData>;
+  try {
+    const response = await fetch(GRAPHQL_ENDPOINT, {
+      method: "POST",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new LocalizedError(
+        `GitHub GraphQL request failed with status ${response.status}`,
+        vscode.l10n.t("GitHub GraphQL request failed with status {0}", response.status),
+      );
+    }
+    payload = (await response.json()) as IGraphQlPayload<TData>;
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new LocalizedError(
+        "GitHub GraphQL request timed out",
+        vscode.l10n.t("GitHub GraphQL request timed out"),
+      );
+    }
+    throw error;
   }
 
-  const payload = (await response.json()) as IGraphQlPayload<TData>;
   if (payload.errors?.length) {
     throw new Error(payload.errors[0].message);
   }
@@ -308,12 +323,11 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
 }
 
 const REST_ENDPOINT = "https://api.github.com";
-const REST_TIMEOUT_MS = 30_000;
 // GitHub lists at most 3000 files per PR: 30 pages of 100
 const MAX_FILE_PAGES = 30;
 
 async function getRest(token: string, path: string, accept: string, redirect?: RequestRedirect, signal?: AbortSignal): Promise<Response> {
-  const timeoutSignal = AbortSignal.timeout(REST_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const response = await fetch(`${REST_ENDPOINT}${path}`, {
     ...(redirect && { redirect }),

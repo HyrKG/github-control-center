@@ -271,16 +271,48 @@ describe("fetchPullRequests", () => {
     });
   });
 
-  it("should throw when the HTTP response is not ok", async () => {
-    stubFetch({}, 401);
+  it("should throw when the HTTP response is not ok and cancel the error body stream", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      body: { cancel },
+      json: async () => ({}),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(fetchPullRequests("token")).rejects.toThrow("401");
+    expect(cancel).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("should throw the first GraphQL error message", async () => {
     stubFetch({ errors: [{ message: "Bad credentials" }] });
 
     await expect(fetchPullRequests("token")).rejects.toThrow("Bad credentials");
+  });
+
+  it.each(["TimeoutError", "AbortError"] as const)("should map GraphQL %s to a localized timeout error", async (errorName) => {
+    const abortError = new Error("signal timed out");
+    abortError.name = errorName;
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+
+    await expect(fetchPullRequests("token")).rejects.toThrow("GitHub GraphQL request timed out");
+  });
+
+  it("should map response.json() TimeoutError to a localized timeout error", async () => {
+    const timeoutError = new Error("body read timed out");
+    timeoutError.name = "TimeoutError";
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw timeoutError;
+      },
+    })));
+
+    await expect(fetchPullRequests("token")).rejects.toThrow("GitHub GraphQL request timed out");
   });
 });
 

@@ -4,7 +4,7 @@ import { fetchReviewThreads } from "../github/github";
 import { gitHubFileRoot } from "../github/fileUrls";
 import { fromPrUri, toPrUri } from "./PrContentProvider";
 import { PR_URI_SCHEME } from "./prUri";
-import { threadStatus, toThreadAnchor } from "./reviewThreads";
+import { threadStatus, toThreadAnchor, type IThreadAnchor } from "./reviewThreads";
 import { syncThreads } from "./threadSync";
 import type { IPrFilePatch, IPullRequest, IReviewThread, IReviewThreadsSnapshot } from "../core/types";
 
@@ -40,6 +40,7 @@ export class ReviewController implements vscode.Disposable {
   private readonly threadRefs = new Map<vscode.CommentThread, IThreadRef>();
   // ponytail: one review at a time — the last PR whose diff was opened; QuickPick over PRs if it ever hurts
   private activeReviewPr: IPullRequest | undefined;
+  private disposed = false;
 
   constructor(private readonly deps: IReviewControllerDeps) {
     this.controller = vscode.comments.createCommentController("githubControlCenter", "GitHub Control Center");
@@ -88,6 +89,9 @@ export class ReviewController implements vscode.Disposable {
   }
 
   async ensureThreadsForPr(pr: IPullRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     if (this.statesByPr.has(pr.id)) {
       this.publishPendingState(pr);
       return;
@@ -96,8 +100,17 @@ export class ReviewController implements vscode.Disposable {
   }
 
   async reload(pr: IPullRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const token = await this.deps.getToken();
+    if (this.disposed) {
+      return;
+    }
     const snapshot = await fetchReviewThreads(token, pr.id);
+    if (this.disposed) {
+      return;
+    }
     const state = this.statesByPr.get(pr.id) ?? { snapshot, vsThreads: new Map<string, vscode.CommentThread>() };
     const plan = syncThreads([...state.vsThreads.keys()], snapshot.threads);
 
@@ -109,12 +122,27 @@ export class ReviewController implements vscode.Disposable {
         state.vsThreads.delete(threadId);
       }
     }
-    for (const thread of plan.create) {
-      const vsThread = await this.materializeThread(pr, thread);
-      if (vsThread) {
-        state.vsThreads.set(thread.id, vsThread);
-        this.threadRefs.set(vsThread, { prId: pr.id, threadId: thread.id });
+    const prepared = await Promise.all(
+      plan.create.map(async (thread) => {
+        const anchor = toThreadAnchor(thread);
+        if (!anchor) {
+          return undefined;
+        }
+        // LEFT-side threads on renamed files live at the old path in the diff editor
+        const patch = anchor.side === "LEFT" ? await this.deps.getPatch(pr, thread.path) : undefined;
+        return { thread, anchor, patch };
+      }),
+    );
+    if (this.disposed) {
+      return;
+    }
+    for (const item of prepared) {
+      if (!item) {
+        continue;
       }
+      const vsThread = this.materializeThread(pr, item.thread, item.anchor, item.patch);
+      state.vsThreads.set(item.thread.id, vsThread);
+      this.threadRefs.set(vsThread, { prId: pr.id, threadId: item.thread.id });
     }
     for (const thread of plan.update) {
       const vsThread = state.vsThreads.get(thread.id);
@@ -134,13 +162,12 @@ export class ReviewController implements vscode.Disposable {
     this.deps.onPendingChanged(count > 0 || snapshot?.pendingReviewId ? pr : undefined, count);
   }
 
-  private async materializeThread(pr: IPullRequest, thread: IReviewThread): Promise<vscode.CommentThread | undefined> {
-    const anchor = toThreadAnchor(thread);
-    if (!anchor) {
-      return undefined;
-    }
-    // LEFT-side threads on renamed files live at the old path in the diff editor
-    const patch = anchor.side === "LEFT" ? await this.deps.getPatch(pr, thread.path) : undefined;
+  private materializeThread(
+    pr: IPullRequest,
+    thread: IReviewThread,
+    anchor: IThreadAnchor,
+    patch: IPrFilePatch | undefined,
+  ): vscode.CommentThread {
     const uri = toPrUri({
       prId: pr.id,
       repo: pr.repo,
@@ -182,11 +209,14 @@ export class ReviewController implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const state of this.statesByPr.values()) {
       for (const vsThread of state.vsThreads.values()) {
         vsThread.dispose();
       }
     }
+    this.statesByPr.clear();
+    this.threadRefs.clear();
     this.controller.dispose();
   }
 }

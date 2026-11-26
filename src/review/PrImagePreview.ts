@@ -238,10 +238,16 @@ export class PrImagePreview implements vscode.Disposable {
     }
   }
 
-  dispose(): void {
-    for (const { panel } of this.panels.values()) {
+  clear(): void {
+    const entries = [...this.panels.values()];
+    this.panels.clear();
+    for (const { panel } of entries) {
       panel.dispose();
     }
+  }
+
+  dispose(): void {
+    this.clear();
   }
 }
 

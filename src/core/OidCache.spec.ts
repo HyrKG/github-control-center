@@ -94,4 +94,14 @@ describe("AsyncOidCache", () => {
 
     expect(create).toHaveBeenCalledTimes(2);
   });
+
+  it("should drop cached entries after clear()", async () => {
+    const cache = new AsyncOidCache<string[]>();
+    const create = vi.fn().mockResolvedValueOnce(["v1.ts"]).mockResolvedValueOnce(["v2.ts"]);
+
+    await expect(cache.load("PR_1", "oid-a", create)).resolves.toEqual(["v1.ts"]);
+    cache.clear();
+    await expect(cache.load("PR_1", "oid-a", create)).resolves.toEqual(["v2.ts"]);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
 });

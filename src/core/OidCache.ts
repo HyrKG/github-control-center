@@ -25,6 +25,10 @@ export class OidCache<TValue> {
   delete(prId: string): void {
     this.entries.delete(prId);
   }
+
+  clear(): void {
+    this.entries.clear();
+  }
 }
 
 /**
@@ -34,6 +38,10 @@ export class OidCache<TValue> {
  */
 export class AsyncOidCache<TValue> {
   private readonly cache = new OidCache<Promise<TValue>>();
+
+  clear(): void {
+    this.cache.clear();
+  }
 
   load(prId: string, oid: string, create: () => Promise<TValue>): Promise<TValue> {
     const cached = this.cache.get(prId, oid);

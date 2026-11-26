@@ -57,6 +57,7 @@ function buildFile(overrides: Partial<IPrFile> = {}): IPrFile {
 
 interface IMockWebviewView {
   badge?: vscode.ViewBadge;
+  visible?: boolean;
   htmlWrites: number;
   webview: {
     options: vscode.WebviewOptions;
@@ -65,16 +66,20 @@ interface IMockWebviewView {
     onDidReceiveMessage: (cb: (message: unknown) => void) => { dispose: () => void };
     emitMessage: (message: unknown) => void;
   };
+  onDidChangeVisibility?: (cb: () => void) => { dispose: () => void };
+  emitVisibilityChange: (visible: boolean) => void;
   onDidDispose: (cb: () => void) => { dispose: () => void };
   dispose: () => void;
 }
 
-function createMockWebviewView(): IMockWebviewView {
+function createMockWebviewView(options: { includeVisibility?: boolean; visible?: boolean } = {}): IMockWebviewView {
   let htmlValue = "";
   let onMessage: ((message: unknown) => void) | undefined;
+  let onVisibilityChange: (() => void) | undefined;
   let onDispose: (() => void) | undefined;
   const mock: IMockWebviewView = {
     badge: undefined,
+    ...(options.includeVisibility ? { visible: options.visible ?? true } : {}),
     htmlWrites: 0,
     webview: {
       options: {},
@@ -91,6 +96,18 @@ function createMockWebviewView(): IMockWebviewView {
         return { dispose: vi.fn() };
       },
       emitMessage: (message) => onMessage?.(message),
+    },
+    ...(options.includeVisibility
+      ? {
+          onDidChangeVisibility: (cb: () => void) => {
+            onVisibilityChange = cb;
+            return { dispose: vi.fn() };
+          },
+        }
+      : {}),
+    emitVisibilityChange: (visible) => {
+      mock.visible = visible;
+      onVisibilityChange?.();
     },
     onDidDispose: (cb) => {
       onDispose = cb;
@@ -345,5 +362,139 @@ describe("PrSidebarViewProvider", () => {
     view.dispose();
     provider.refresh();
     expect(view.webview.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("skips postMessage when the serialized snapshot is unchanged and resets cache on re-resolve", () => {
+    const view = createMockWebviewView();
+    const pr = buildPr({ id: "PR_1", title: "Same" });
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    view.webview.postMessage.mockClear();
+
+    provider.setPrs([pr]);
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+
+    // Identical state on subsequent poll or refresh skips postMessage
+    provider.setPrs([buildPr({ id: "PR_1", title: "Same" })]);
+    provider.refresh();
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+
+    // Changed state posts again
+    provider.setPrs([buildPr({ id: "PR_1", title: "Updated" })]);
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(2);
+
+    // Re-resolving a new view resets lastPostedSnapshotJson so initial ready posts state
+    const view2 = createMockWebviewView();
+    provider.resolveWebviewView(view2 as unknown as vscode.WebviewView);
+    view2.webview.emitMessage({ command: "ready" });
+    expect(view2.webview.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers state posts while the view is hidden and flushes when it becomes visible", () => {
+    const view = createMockWebviewView({ includeVisibility: true, visible: true });
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    view.webview.postMessage.mockClear();
+
+    // Hide view -> updates are deferred
+    view.emitVisibilityChange(false);
+    provider.setPrs([buildPr({ id: "PR_1", title: "Deferred update" })]);
+    expect(view.webview.postMessage).not.toHaveBeenCalled();
+
+    // Show view -> deferred snapshot flushes immediately
+    view.emitVisibilityChange(true);
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Deferred update");
+
+    // Re-hiding and showing with no new changes does not re-post
+    view.webview.postMessage.mockClear();
+    view.emitVisibilityChange(false);
+    view.emitVisibilityChange(true);
+    expect(view.webview.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("re-posts snapshot when webview reloads (ready) and recovers when postMessage returns false or rejects", async () => {
+    const view = createMockWebviewView({ includeVisibility: true, visible: true });
+    provider.setPrs([buildPr({ id: "PR_1", title: "Alpha" })]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+
+    // Webview reloads and emits ready again with unchanged data -> must re-post!
+    view.webview.emitMessage({ command: "ready" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(2);
+
+    // Next postMessage resolves to false (undelivered) -> must not latch dedup cache
+    view.webview.postMessage.mockResolvedValueOnce(false);
+    provider.setPrs([buildPr({ id: "PR_1", title: "Beta" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(3);
+
+    // Visibility restore (or refresh) retries delivering "Beta"
+    view.emitVisibilityChange(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(4);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Beta");
+
+    // Rejected postMessage also does not latch dedup cache
+    view.webview.postMessage.mockRejectedValueOnce(new Error("webview disposed"));
+    provider.setPrs([buildPr({ id: "PR_1", title: "Gamma" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(5);
+
+    provider.refresh();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(6);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Gamma");
+
+    // Failed latest postMessage clears lastPostedSnapshotJson so reverting to an earlier state still re-posts
+    view.webview.postMessage.mockResolvedValueOnce(false);
+    provider.setPrs([buildPr({ id: "PR_1", title: "Delta" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(7);
+
+    // Reverting to "Gamma" (previously delivered before "Delta" failed) must NOT be suppressed
+    provider.setPrs([buildPr({ id: "PR_1", title: "Gamma" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(8);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Gamma");
+  });
+
+  it("marks file nodes as stale while a silent headRefOid refresh is still in flight", async () => {
+    const view = createMockWebviewView();
+    const file = buildFile({ path: "src/app.ts", changeType: "MODIFIED" });
+    actions.loadFiles.mockResolvedValueOnce([file]);
+    provider.setPrs([buildPr({ id: "PR_1", headRefOid: "oid-1" })]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    await vi.waitFor(() => expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-1" }),
+      file,
+    }));
+
+    // Poll brings new headRefOid while silent reload is pending
+    let resolveReload!: (files: IPrFile[]) => void;
+    actions.loadFiles.mockImplementationOnce(() => new Promise<IPrFile[]>((resolve) => { resolveReload = resolve; }));
+    provider.setPrs([buildPr({ id: "PR_1", headRefOid: "oid-2" })]);
+
+    expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-2" }),
+      file,
+      stale: true,
+    });
+
+    // Once silent reload finishes, the node is fresh again (no stale flag)
+    const freshFile = buildFile({ path: "src/app.ts", changeType: "RENAMED" });
+    resolveReload([freshFile]);
+    await vi.waitFor(() => expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-2" }),
+      file: freshFile,
+    }));
   });
 });
