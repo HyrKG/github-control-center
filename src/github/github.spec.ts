@@ -881,13 +881,105 @@ describe("fetchPrDetails", () => {
     expect(details.isBehindBase).toBe(false);
   });
 
-  it("should send the head ref name as a query variable", async () => {
-    stubFetch({ data: { viewer: { login: "jane" }, node: buildDetailsNode() } });
+  it("should ignore partial NOT_FOUND errors on exact path node.baseRef.compare when data.node is present", async () => {
+    stubFetch({
+      data: {
+        viewer: { login: "jane" },
+        node: buildDetailsNode({
+          headRepository: { nameWithOwner: "someone-else/repo" },
+          baseRef: { compare: null },
+        }),
+      },
+      errors: [
+        {
+          type: "NOT_FOUND",
+          path: ["node", "baseRef", "compare"],
+          message: "Could not resolve head ref 'refs/pull/17101/head'.",
+        },
+      ],
+    });
 
-    await fetchPrDetails("token", "PR_42", "feature/thing");
+    const details = await fetchPrDetails("token", "PR_42", "refs/pull/17101/head");
+
+    expect(details.number).toBe(42);
+    expect(details.title).toBe("A title");
+    expect(details.isBehindBase).toBe(false);
+  });
+
+  it("should throw when a compare error has a non-NOT_FOUND type or omits type", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ type: "FORBIDDEN", path: ["node", "baseRef", "compare"], message: "Comparison forbidden" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Comparison forbidden");
+
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ path: ["node", "baseRef", "compare"], message: "Comparison error without type" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Comparison error without type");
+  });
+
+  it("should throw on subpaths under node.baseRef.compare even when type is NOT_FOUND", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ type: "NOT_FOUND", path: ["node", "baseRef", "compare", "behindBy"], message: "Comparison subpath unavailable" }],
+    });
+
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Comparison subpath unavailable");
+  });
+
+  it("should throw the first non-ignorable error when errors include another path alongside compare", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [
+        { type: "NOT_FOUND", path: ["node", "baseRef", "compare"], message: "Could not resolve head ref 'refs/pull/17101/head'." },
+        { type: "FORBIDDEN", path: ["node", "reviews"], message: "Reviews unavailable" },
+      ],
+    });
+
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Reviews unavailable");
+  });
+
+  it("should throw when an error targets a parent path or has no path", async () => {
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: null }) },
+      errors: [{ type: "NOT_FOUND", path: ["node", "baseRef"], message: "Base ref unavailable" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Base ref unavailable");
+
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: buildDetailsNode({ baseRef: { compare: null } }) },
+      errors: [{ type: "FORBIDDEN", message: "Resource not accessible" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow("Resource not accessible");
+  });
+
+  it("should still throw an ignorable compare error when payload data or data.node is missing", async () => {
+    stubFetch({
+      errors: [{ type: "NOT_FOUND", path: ["node", "baseRef", "compare"], message: "Could not resolve head ref 'refs/pull/17101/head'." }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow(
+      "Could not resolve head ref 'refs/pull/17101/head'.",
+    );
+
+    stubFetch({
+      data: { viewer: { login: "jane" }, node: null },
+      errors: [{ type: "NOT_FOUND", path: ["node", "baseRef", "compare"], message: "Node missing alongside compare error" }],
+    });
+    await expect(fetchPrDetails("token", "PR_42", "refs/pull/17101/head")).rejects.toThrow(
+      "Node missing alongside compare error",
+    );
+  });
+
+  it("should send the head ref as a query variable", async () => {
+    stubFetch({ data: { viewer: { login: "jane" }, node: buildDetailsNode() } });
+    const headRef = "refs/pull/17101/head";
+
+    await fetchPrDetails("token", "PR_42", headRef);
 
     const requestBody = JSON.parse((fetch as Mock).mock.calls[0][1].body as string);
-    expect(requestBody.variables).toEqual({ id: "PR_42", headRef: "feature/thing" });
+    expect(requestBody.variables).toEqual({ id: "PR_42", headRef });
   });
 
   it("should fall back to the base repo when headRepository is missing", async () => {

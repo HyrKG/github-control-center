@@ -272,9 +272,41 @@ interface IGraphQlDetailsNode {
   };
 }
 
+interface IGraphQlError {
+  message: string;
+  type?: string;
+  path?: ReadonlyArray<string | number>;
+}
+
 interface IGraphQlPayload<TData> {
   data?: TData;
-  errors?: Array<{ message: string }>;
+  errors?: IGraphQlError[];
+}
+
+interface IGraphQlIgnorableError {
+  path: ReadonlyArray<string | number>;
+  type: string;
+}
+
+interface IGraphQlOptions<TData> {
+  ignorableErrors?: ReadonlyArray<IGraphQlIgnorableError>;
+  canIgnorePartialErrors?: (data: TData) => boolean;
+}
+
+function isIgnorableGraphQlError(
+  error: IGraphQlError,
+  ignorableErrors: ReadonlyArray<IGraphQlIgnorableError>,
+): boolean {
+  const { path, type } = error;
+  if (!path?.length || !type) {
+    return false;
+  }
+  return ignorableErrors.some(
+    (allowed) =>
+      allowed.type === type &&
+      path.length === allowed.path.length &&
+      allowed.path.every((segment, index) => path[index] === segment),
+  );
 }
 
 export function getSession(createIfNone: boolean): Thenable<vscode.AuthenticationSession | undefined> {
@@ -283,7 +315,12 @@ export function getSession(createIfNone: boolean): Thenable<vscode.Authenticatio
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-async function postGraphQl<TData>(token: string, query: string, variables?: Record<string, unknown>): Promise<TData> {
+async function postGraphQl<TData>(
+  token: string,
+  query: string,
+  variables?: Record<string, unknown>,
+  options?: IGraphQlOptions<TData>,
+): Promise<TData> {
   let payload: IGraphQlPayload<TData>;
   try {
     const response = await fetch(GRAPHQL_ENDPOINT, {
@@ -314,7 +351,17 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
   }
 
   if (payload.errors?.length) {
-    throw new Error(payload.errors[0].message);
+    const ignorableErrors = options?.ignorableErrors;
+    const canIgnore =
+      Boolean(payload.data) &&
+      Boolean(ignorableErrors?.length) &&
+      (options?.canIgnorePartialErrors ? options.canIgnorePartialErrors(payload.data as TData) : true);
+    const firstBlockingError = canIgnore
+      ? payload.errors.find((error) => !isIgnorableGraphQlError(error, ignorableErrors!))
+      : payload.errors[0];
+    if (firstBlockingError) {
+      throw new Error(firstBlockingError.message);
+    }
   }
   if (!payload.data) {
     throw new LocalizedError("GitHub GraphQL response has no data", vscode.l10n.t("GitHub GraphQL response has no data"));
@@ -447,11 +494,19 @@ export async function fetchPullRequests(token: string): Promise<IPrSnapshot> {
   };
 }
 
-export async function fetchPrDetails(token: string, prId: string, headRefName: string): Promise<IPrDetails> {
-  const data = await postGraphQl<{ viewer: { login: string }; node: IGraphQlDetailsNode | null }>(token, DETAILS_QUERY, {
-    id: prId,
-    headRef: headRefName,
-  });
+export async function fetchPrDetails(token: string, prId: string, headRef: string): Promise<IPrDetails> {
+  const data = await postGraphQl<{ viewer: { login: string }; node: IGraphQlDetailsNode | null }>(
+    token,
+    DETAILS_QUERY,
+    {
+      id: prId,
+      headRef,
+    },
+    {
+      ignorableErrors: [{ path: ["node", "baseRef", "compare"], type: "NOT_FOUND" }],
+      canIgnorePartialErrors: (payloadData) => Boolean(payloadData.node),
+    },
+  );
   if (!data.node) {
     throw new LocalizedError("Pull request not found", vscode.l10n.t("Pull request not found"));
   }
@@ -835,8 +890,9 @@ function toPrDetails(node: IGraphQlDetailsNode, viewerLogin: string): IPrDetails
     headRepo: node.headRepository?.nameWithOwner ?? node.repository.nameWithOwner,
     headRefOid: node.headRefOid,
     // Ref.compare works without branch protection; mergeStateStatus only reports BEHIND with strict protection.
-    // compare(headRef:) resolves the name inside the BASE repo, so on a cross-fork PR a same-named
-    // base-repo branch would be compared instead — skip the check entirely for forks.
+    // The query passes refs/pull/<number>/head (present on the base repo for both same-repo and fork PRs,
+    // without colliding with same-named base branches or lagging behind cached list SHAs). Still gate on
+    // isSameRepoPr so external reviewers without push access don't see an unusable Update branch button on forks.
     isBehindBase: isSameRepoPr(node) && (node.baseRef?.compare?.behindBy ?? 0) > 0,
     commitsCount: node.commits.totalCount,
     changedFiles: node.changedFiles,

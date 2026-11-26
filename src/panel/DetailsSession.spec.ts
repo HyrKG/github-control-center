@@ -158,6 +158,35 @@ describe("DetailsSession", () => {
     );
   });
 
+  it("passes refs/pull/<number>/head rather than headRefName or stale headRefOid on open, refresh, and post-updateBranch reopen", async () => {
+    const pr = buildPr({
+      id: "PR_FORK",
+      number: 17101,
+      headRefName: "fix-virtualizer-detached-row-leak",
+      headRefOid: "0123456789abcdef0123456789abcdef01234567",
+    });
+    const deps = buildDeps();
+    const session = new DetailsSession(deps);
+    try {
+      await session.openPrDetails(pr);
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
+
+      deps.fetchPrDetails.mockClear();
+      await session.refreshOpenDetails();
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
+
+      // After updateBranch, runPrMutation immediately reopens details using the same `pr` object
+      // whose headRefOid is still stale until the background search refresh catches up.
+      deps.fetchPrDetails.mockClear();
+      session.handleMessage({ command: "updateBranch", method: "REBASE" });
+      await flush();
+      expect(deps.updatePrBranch).toHaveBeenCalledExactlyOnceWith("token", pr.id, "REBASE");
+      expect(deps.fetchPrDetails).toHaveBeenCalledExactlyOnceWith("token", pr.id, "refs/pull/17101/head");
+    } finally {
+      session.dispose();
+    }
+  });
+
   describe("openPrDetails — stale-response guard", () => {
     it("keeps only the latest click's details, dropping a slower earlier fetch", async () => {
       const prA = buildPr({ id: "A" });
