@@ -22,6 +22,11 @@ export interface ISidebarClientStrings {
   expandPr: string;
   expandRepo: string;
   expandFolder: string;
+  searchPlaceholder: string;
+  clearSearch: string;
+  noMatchingPrs: string;
+  favoriteRepo: string;
+  unfavoriteRepo: string;
 }
 
 export interface ISidebarFileView {
@@ -68,6 +73,7 @@ export interface ISidebarPrView {
 
 export interface ISidebarRepoGroupView {
   repo: string;
+  favorite: boolean;
   prs: ISidebarPrView[];
 }
 
@@ -139,6 +145,11 @@ const SIDEBAR_CSS = `
   --ghcc-checkbox-bg: var(--vscode-checkbox-background, transparent);
   --ghcc-checkbox-border: var(--vscode-checkbox-border, rgba(128, 128, 128, 0.55));
   --ghcc-checkbox-fg: var(--vscode-checkbox-foreground, var(--ghcc-fg));
+  --ghcc-input-bg: var(--vscode-input-background, rgba(128, 128, 128, 0.12));
+  --ghcc-input-fg: var(--vscode-input-foreground, var(--ghcc-fg));
+  --ghcc-input-placeholder: var(--vscode-input-placeholderForeground, var(--ghcc-muted));
+  --ghcc-input-border: var(--vscode-input-border, var(--ghcc-border));
+  --ghcc-favorite: var(--vscode-charts-yellow, #e3b341);
 }
 
 * {
@@ -150,7 +161,7 @@ html, body {
   padding: 0;
   width: 100%;
   min-height: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
   background: var(--ghcc-bg);
   color: var(--ghcc-fg);
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
@@ -162,8 +173,108 @@ html, body {
 #app {
   width: 100%;
   max-width: 100%;
-  padding: 2px 0 8px;
+  padding: 0;
   user-select: none;
+}
+
+#search-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 100%;
+  max-width: 100%;
+  padding: 5px 8px 6px;
+  background: var(--ghcc-bg);
+  border-bottom: 1px solid var(--ghcc-border);
+  overflow: hidden;
+}
+
+.search-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px 0 7px;
+  border: 1px solid var(--ghcc-input-border);
+  border-radius: 2px;
+  background: var(--ghcc-input-bg);
+}
+
+.search-input-wrap:focus-within {
+  border-color: var(--ghcc-focus);
+}
+
+.search-icon {
+  color: var(--ghcc-input-placeholder);
+}
+
+.search-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.search-input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 0;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ghcc-input-fg);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 22px;
+  user-select: text;
+}
+
+.search-input::placeholder {
+  color: var(--ghcc-input-placeholder);
+}
+
+.search-clear {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ghcc-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.search-clear:hover {
+  background: var(--ghcc-hover-bg);
+  color: var(--ghcc-fg);
+}
+
+.search-clear:focus-visible {
+  outline: 1px solid var(--ghcc-focus);
+  outline-offset: -1px;
+}
+
+.search-clear svg {
+  width: 11px;
+  height: 11px;
+}
+
+#search-bar.is-hidden,
+.search-clear.is-hidden {
+  display: none;
+}
+
+#tree-root {
+  width: 100%;
+  max-width: 100%;
+  padding: 2px 0 8px;
 }
 
 .empty-state {
@@ -279,6 +390,10 @@ html, body {
   margin-top: 0;
 }
 
+.repo-row.is-favorite .repo-icon {
+  color: var(--ghcc-favorite);
+}
+
 .repo-name {
   flex: 1 1 0;
   min-width: 0;
@@ -290,9 +405,70 @@ html, body {
   letter-spacing: 0.01em;
 }
 
-.repo-count {
+.repo-right {
   flex: 0 0 auto;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.repo-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  margin-right: 0;
+  transition: opacity 0.12s ease;
+}
+
+.repo-row:hover .repo-actions,
+.repo-row:focus-within .repo-actions {
+  max-width: 22px;
+  opacity: 1;
+  pointer-events: auto;
+  margin-right: 4px;
+}
+
+.repo-action-btn {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ghcc-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.repo-action-btn:hover {
+  background: var(--ghcc-hover-bg);
+  color: var(--ghcc-fg);
+}
+
+.repo-action-btn.is-favorite,
+.repo-action-btn.is-favorite:hover {
+  color: var(--ghcc-favorite);
+}
+
+.repo-action-btn:focus-visible {
+  outline: 1px solid var(--ghcc-focus);
+  outline-offset: -1px;
+}
+
+.repo-action-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.repo-count {
+  flex: 0 0 auto;
   padding: 0 5px;
   min-width: 16px;
   height: 15px;
@@ -703,6 +879,12 @@ const SIDEBAR_SCRIPT = `
   var persisted = (typeof vscode.getState === "function" && vscode.getState()) || {};
   var collapsedRepos = new Set(Array.isArray(persisted.collapsedRepos) ? persisted.collapsedRepos : []);
   var collapsedFolders = new Set(Array.isArray(persisted.collapsedFolders) ? persisted.collapsedFolders : []);
+  var searchQuery = typeof persisted.searchQuery === "string" ? persisted.searchQuery : "";
+  var searchBar = document.getElementById("search-bar");
+  var treeRoot = document.getElementById("tree-root");
+  var searchInput = null;
+  var searchClearBtn = null;
+  var isComposing = false;
   var focusedRowId = null;
   var selectedRowId = null;
   var copiedPrTimers = Object.create(null);
@@ -771,6 +953,19 @@ const SIDEBAR_SCRIPT = `
       { tag: "circle", cx: "8", cy: "8", r: "5.75", stroke: "currentColor", sw: "1.35", fill: "none" },
       { tag: "path", d: "M8 4.8v3.7M8 11.1h.01", stroke: "currentColor", sw: "1.5", fill: "none", cap: "round" },
     ],
+    search: [
+      { tag: "circle", cx: "7", cy: "7", r: "4.5", stroke: "currentColor", sw: "1.4", fill: "none" },
+      { tag: "path", d: "M10.4 10.4L13.8 13.8", stroke: "currentColor", sw: "1.5", fill: "none", cap: "round" },
+    ],
+    close: [
+      { tag: "path", d: "M4.5 4.5l7 7M11.5 4.5l-7 7", stroke: "currentColor", sw: "1.5", fill: "none", cap: "round" },
+    ],
+    star: [
+      { tag: "path", d: "M8 2.1l1.75 3.55 3.92.57-2.84 2.76.67 3.9L8 11.04l-3.5 1.84.67-3.9-2.84-2.76 3.92-.57L8 2.1z", stroke: "currentColor", sw: "1.3", fill: "none", join: "round" },
+    ],
+    starFilled: [
+      { tag: "path", d: "M8 2.1l1.75 3.55 3.92.57-2.84 2.76.67 3.9L8 11.04l-3.5 1.84.67-3.9-2.84-2.76 3.92-.57L8 2.1z", stroke: "currentColor", sw: "1.1", fill: "currentColor", join: "round" },
+    ],
   };
 
   function persistUiState() {
@@ -778,6 +973,7 @@ const SIDEBAR_SCRIPT = `
       vscode.setState({
         collapsedRepos: Array.from(collapsedRepos),
         collapsedFolders: Array.from(collapsedFolders),
+        searchQuery: searchQuery,
       });
     }
   }
@@ -896,9 +1092,8 @@ const SIDEBAR_SCRIPT = `
 
   function setActiveRow(rowId, shouldFocus) {
     focusedRowId = rowId;
-    var app = document.getElementById("app");
-    if (!app) { return; }
-    var rows = app.querySelectorAll("[data-row-id]");
+    if (!treeRoot) { return; }
+    var rows = treeRoot.querySelectorAll("[data-row-id]");
     var targetEl = null;
     for (var i = 0; i < rows.length; i++) {
       var el = rows[i];
@@ -1248,14 +1443,85 @@ const SIDEBAR_SCRIPT = `
     return row;
   }
 
+  function clearSearch(focusInput) {
+    searchQuery = "";
+    if (searchInput) {
+      searchInput.value = "";
+    }
+    persistUiState();
+    render(false);
+    if (focusInput && searchInput && typeof searchInput.focus === "function") {
+      searchInput.focus();
+    }
+  }
+
+  function initSearchBar() {
+    if (!searchBar) { return; }
+    var wrap = document.createElement("div");
+    wrap.className = "search-input-wrap";
+    wrap.appendChild(makeIcon("search", "search-icon"));
+
+    searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.className = "search-input";
+    searchInput.setAttribute("id", "search-input");
+    var placeholder = strings.searchPlaceholder || "Filter by PR title…";
+    searchInput.setAttribute("placeholder", placeholder);
+    searchInput.setAttribute("aria-label", placeholder);
+    searchInput.setAttribute("autocomplete", "off");
+    searchInput.setAttribute("spellcheck", "false");
+    searchInput.value = searchQuery;
+    searchInput.addEventListener("compositionstart", function () {
+      isComposing = true;
+    });
+    searchInput.addEventListener("compositionend", function () {
+      isComposing = false;
+      searchQuery = searchInput.value;
+      persistUiState();
+      render(false);
+    });
+    searchInput.addEventListener("input", function (event) {
+      if (isComposing || (event && event.isComposing)) {
+        return;
+      }
+      searchQuery = searchInput.value;
+      persistUiState();
+      render(false);
+    });
+
+    searchClearBtn = document.createElement("button");
+    searchClearBtn.type = "button";
+    searchClearBtn.className = "search-clear" + (searchQuery.length === 0 ? " is-hidden" : "");
+    searchClearBtn.setAttribute("id", "search-clear");
+    var clearLabel = strings.clearSearch || "Clear search";
+    searchClearBtn.setAttribute("aria-label", clearLabel);
+    searchClearBtn.setAttribute("title", clearLabel);
+    searchClearBtn.appendChild(createSvg("close"));
+    searchClearBtn.addEventListener("click", function () {
+      clearSearch(true);
+    });
+
+    wrap.appendChild(searchInput);
+    wrap.appendChild(searchClearBtn);
+    searchBar.replaceChildren(wrap);
+  }
+
   function render(restoreFocus) {
-    var app = document.getElementById("app");
-    if (!app) { return; }
+    if (!treeRoot) { return; }
     copyButtons = Object.create(null);
 
     var prevActive = document.activeElement;
     var hadFocusInList = Boolean(prevActive && prevActive.getAttribute && prevActive.getAttribute("data-row-id"));
     var prevScrollY = typeof window.scrollY === "number" ? window.scrollY : 0;
+
+    var hasGroups = Boolean(snapshot.groups && snapshot.groups.length > 0);
+    var showSearch = Boolean(snapshot.signedIn && (hasGroups || searchQuery.length > 0));
+    if (searchBar) {
+      searchBar.classList.toggle("is-hidden", !showSearch);
+    }
+    if (searchClearBtn) {
+      searchClearBtn.classList.toggle("is-hidden", searchQuery.length === 0);
+    }
 
     if (!snapshot.signedIn) {
       var signInWrap = document.createElement("div");
@@ -1271,17 +1537,47 @@ const SIDEBAR_SCRIPT = `
       });
       signInWrap.appendChild(signInMsg);
       signInWrap.appendChild(signInBtn);
-      app.replaceChildren(signInWrap);
+      treeRoot.replaceChildren(signInWrap);
       return;
     }
 
-    if (!snapshot.groups || snapshot.groups.length === 0) {
+    var query = searchQuery.trim().toLowerCase();
+    var isSearching = query.length > 0;
+
+    if (!hasGroups) {
       var emptyWrap = document.createElement("div");
       emptyWrap.className = "empty-state";
       var emptyMsg = document.createElement("p");
-      emptyMsg.textContent = strings.emptyMessage || "";
+      emptyMsg.textContent = isSearching ? (strings.noMatchingPrs || "No matching pull requests") : (strings.emptyMessage || "");
       emptyWrap.appendChild(emptyMsg);
-      app.replaceChildren(emptyWrap);
+      treeRoot.replaceChildren(emptyWrap);
+      return;
+    }
+
+    var visibleGroups = [];
+    for (var g = 0; g < snapshot.groups.length; g++) {
+      var rawGroup = snapshot.groups[g];
+      var matchedPrs = isSearching
+        ? rawGroup.prs.filter(function (pr) {
+            return (pr.title || "").toLowerCase().indexOf(query) !== -1;
+          })
+        : rawGroup.prs;
+      if (matchedPrs.length > 0) {
+        visibleGroups.push({
+          repo: rawGroup.repo,
+          favorite: Boolean(rawGroup.favorite),
+          prs: matchedPrs,
+        });
+      }
+    }
+
+    if (visibleGroups.length === 0) {
+      var noMatchWrap = document.createElement("div");
+      noMatchWrap.className = "empty-state";
+      var noMatchMsg = document.createElement("p");
+      noMatchMsg.textContent = strings.noMatchingPrs || "No matching pull requests";
+      noMatchWrap.appendChild(noMatchMsg);
+      treeRoot.replaceChildren(noMatchWrap);
       return;
     }
 
@@ -1289,36 +1585,70 @@ const SIDEBAR_SCRIPT = `
     tree.className = "tree-list";
     tree.setAttribute("role", "tree");
 
-    for (var i = 0; i < snapshot.groups.length; i++) {
-      var group = snapshot.groups[i];
+    for (var i = 0; i < visibleGroups.length; i++) {
+      var group = visibleGroups[i];
       var repoRowId = "repo:" + group.repo;
-      var repoExpanded = !collapsedRepos.has(group.repo);
+      var repoExpanded = isSearching || !collapsedRepos.has(group.repo);
 
       var repoRow = document.createElement("div");
-      repoRow.className = "row repo-row";
+      repoRow.className = group.favorite ? "row repo-row is-favorite" : "row repo-row";
       repoRow.setAttribute("role", "treeitem");
       repoRow.setAttribute("aria-expanded", repoExpanded ? "true" : "false");
       repoRow.setAttribute("data-row-id", repoRowId);
       repoRow.setAttribute("data-row-kind", "repo");
       repoRow.setAttribute("data-repo", group.repo);
       repoRow.setAttribute("title", group.repo);
-      repoRow.setAttribute("data-vscode-context", JSON.stringify({ preventDefaultContextMenuItems: true }));
+      repoRow.setAttribute("data-vscode-context", JSON.stringify({
+        webviewSection: "repo",
+        repo: group.repo,
+        preventDefaultContextMenuItems: true,
+      }));
 
       repoRow.appendChild(makeIcon("chevron", repoExpanded ? "chevron is-expanded" : "chevron"));
-      repoRow.appendChild(makeIcon("repo", ""));
+      repoRow.appendChild(makeIcon("repo", "repo-icon"));
 
       var repoName = document.createElement("span");
       repoName.className = "repo-name";
       repoName.textContent = group.repo;
       repoRow.appendChild(repoName);
 
+      var repoRight = document.createElement("div");
+      repoRight.className = "repo-right";
+
+      var repoActions = document.createElement("div");
+      repoActions.className = "repo-actions";
+
+      var favBtn = document.createElement("button");
+      favBtn.type = "button";
+      favBtn.className = group.favorite ? "repo-action-btn is-favorite" : "repo-action-btn";
+      favBtn.tabIndex = -1;
+      var favLabel = group.favorite ? (strings.unfavoriteRepo || "Unfavorite repository") : (strings.favoriteRepo || "Favorite repository");
+      favBtn.setAttribute("aria-label", favLabel);
+      favBtn.setAttribute("title", favLabel);
+      favBtn.appendChild(createSvg(group.favorite ? "starFilled" : "star"));
+      (function (repoNameKey) {
+        favBtn.addEventListener("click", function (event) {
+          event.stopPropagation();
+          vscode.postMessage({ command: "toggleFavoriteRepo", repo: repoNameKey });
+        });
+      })(group.repo);
+      repoActions.appendChild(favBtn);
+
       var countEl = document.createElement("span");
       countEl.className = "repo-count";
       countEl.textContent = String(group.prs.length);
-      repoRow.appendChild(countEl);
 
-      (function (repoNameKey, id) {
+      repoRight.appendChild(repoActions);
+      repoRight.appendChild(countEl);
+      repoRow.appendChild(repoRight);
+
+      (function (repoNameKey, id, searching) {
         repoRow.addEventListener("click", function () {
+          if (searching) {
+            focusedRowId = id;
+            setActiveRow(id, true);
+            return;
+          }
           if (collapsedRepos.has(repoNameKey)) {
             collapsedRepos.delete(repoNameKey);
           } else {
@@ -1328,7 +1658,7 @@ const SIDEBAR_SCRIPT = `
           focusedRowId = id;
           render(true);
         });
-      })(group.repo, repoRowId);
+      })(group.repo, repoRowId, isSearching);
 
       tree.appendChild(repoRow);
 
@@ -1344,7 +1674,7 @@ const SIDEBAR_SCRIPT = `
       }
     }
 
-    app.replaceChildren(tree);
+    treeRoot.replaceChildren(tree);
 
     var rows = tree.querySelectorAll("[data-row-id]");
     var focusTarget = null;
@@ -1375,13 +1705,64 @@ const SIDEBAR_SCRIPT = `
     }
   }
 
-  document.addEventListener("keydown", function (event) {
-    var app = document.getElementById("app");
-    if (!app) { return; }
-    var rows = Array.prototype.slice.call(app.querySelectorAll("[data-row-id]"));
-    if (rows.length === 0) { return; }
+  function isInside(container, target) {
+    if (!container || !target) { return false; }
+    if (typeof container.contains === "function") {
+      return container.contains(target);
+    }
+    var cur = target;
+    while (cur) {
+      if (cur === container) { return true; }
+      cur = cur.parentNode;
+    }
+    return false;
+  }
 
+  document.addEventListener("keydown", function (event) {
+    if (isComposing || event.isComposing || event.keyCode === 229) {
+      return;
+    }
+
+    var searchVisible = Boolean(searchBar && !searchBar.classList.contains("is-hidden"));
     var active = document.activeElement;
+    var inSearchBar = isInside(searchBar, active);
+
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && (event.key === "f" || event.key === "F")) {
+      if (searchInput && searchVisible) {
+        event.preventDefault();
+        if (typeof searchInput.focus === "function") { searchInput.focus(); }
+        if (typeof searchInput.select === "function") { searchInput.select(); }
+      }
+      return;
+    }
+
+    if (event.key === "Escape" && searchVisible && (searchQuery.length > 0 || active === searchInput)) {
+      event.preventDefault();
+      if (searchQuery.length > 0) {
+        clearSearch(inSearchBar);
+      }
+      return;
+    }
+
+    if (inSearchBar) {
+      if (active === searchInput && event.key === "ArrowDown" && treeRoot) {
+        var firstRows = treeRoot.querySelectorAll("[data-row-id]");
+        if (firstRows.length > 0) {
+          event.preventDefault();
+          setActiveRow(firstRows[0].getAttribute("data-row-id"), true);
+        }
+      }
+      return;
+    }
+
+    if (!treeRoot) { return; }
+    if (active && active !== document.body && !isInside(treeRoot, active)) {
+      return;
+    }
+
+    var rows = Array.prototype.slice.call(treeRoot.querySelectorAll("[data-row-id]"));
+    if (rows.length === 0) { return; }
+    var isSearching = searchQuery.trim().length > 0;
     var currentIndex = rows.indexOf(active);
     if (currentIndex === -1) {
       for (var i = 0; i < rows.length; i++) {
@@ -1445,7 +1826,7 @@ const SIDEBAR_SCRIPT = `
       var isExpanded = current.getAttribute("aria-expanded") === "true";
       if (kind === "repo" && isExpanded) {
         var rKey = current.getAttribute("data-repo");
-        if (rKey) {
+        if (rKey && !isSearching) {
           collapsedRepos.add(rKey);
           persistUiState();
           render(true);
@@ -1497,7 +1878,7 @@ const SIDEBAR_SCRIPT = `
         }
       } else if (kind === "repo") {
         var toggleRepo = current.getAttribute("data-repo");
-        if (toggleRepo) {
+        if (toggleRepo && !isSearching) {
           if (collapsedRepos.has(toggleRepo)) { collapsedRepos.delete(toggleRepo); } else { collapsedRepos.add(toggleRepo); }
           persistUiState();
           render(true);
@@ -1542,6 +1923,7 @@ const SIDEBAR_SCRIPT = `
     }
   });
 
+  initSearchBar();
   render(false);
   vscode.postMessage({ command: "ready" });
 })();
@@ -1568,7 +1950,7 @@ export function renderSidebarHtml(
 <style nonce="${safeNonce}">${SIDEBAR_CSS}</style>
 </head>
 <body>
-<div id="app" data-vscode-context="{&quot;preventDefaultContextMenuItems&quot;:true}"></div>
+<div id="app" data-vscode-context="{&quot;preventDefaultContextMenuItems&quot;:true}"><div id="search-bar" class="search-bar is-hidden"></div><div id="tree-root"></div></div>
 <script id="ghcc-boot" type="application/json" nonce="${safeNonce}">${boot}</script>
 <script nonce="${safeNonce}">${SIDEBAR_SCRIPT}</script>
 </body>

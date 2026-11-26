@@ -191,6 +191,11 @@
         "category": "%extension.name%"
       },
       {
+        "command": "githubControlCenter.toggleFavoriteRepo",
+        "title": "%commands.toggleFavoriteRepo%",
+        "category": "%extension.name%"
+      },
+      {
         "command": "githubControlCenter.clearBriefCache",
         "title": "%commands.clearBriefCache%",
         "category": "%extension.name%"
@@ -240,16 +245,25 @@
             "order": 1,
             "markdownDescription": "%settings.mutedRepos.description%"
           },
+          "githubControlCenter.favoriteRepos": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "order": 2,
+            "markdownDescription": "%settings.favoriteRepos.description%"
+          },
           "githubControlCenter.toReview.hideDrafts": {
             "type": "boolean",
             "default": false,
-            "order": 2,
+            "order": 3,
             "description": "%settings.toReview.hideDrafts.description%"
           },
           "githubControlCenter.toReview.hideReviewed": {
             "type": "boolean",
             "default": false,
-            "order": 3,
+            "order": 4,
             "description": "%settings.toReview.hideReviewed.description%"
           }
         }
@@ -446,42 +460,51 @@
         {
           "command": "githubControlCenter.checkoutPr",
           "when": "false"
+        },
+        {
+          "command": "githubControlCenter.toggleFavoriteRepo",
+          "when": "false"
         }
       ],
       "webview/context": [
         {
+          "command": "githubControlCenter.toggleFavoriteRepo",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == repo",
+          "group": "1_manage@1"
+        },
+        {
           "command": "githubControlCenter.openTextDiff",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == prFile",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == prFile",
           "group": "1_open@1"
         },
         {
           "command": "githubControlCenter.checkoutPr",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "1_actions@1"
         },
         {
           "command": "githubControlCenter.openPr",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "1_actions@2"
         },
         {
           "command": "githubControlCenter.copyPrUrl",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "2_copy@1"
         },
         {
           "command": "githubControlCenter.copyBranchName",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "2_copy@2"
         },
         {
           "command": "githubControlCenter.muteRepo",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "3_manage@1"
         },
         {
           "command": "githubControlCenter.muteOrg",
-          "when": "(webview == githubControlCenter.toReview || webview == githubControlCenter.reviewed || webview == githubControlCenter.mine) && webviewSection == pr",
+          "when": "(webviewId == githubControlCenter.toReview || webviewId == githubControlCenter.reviewed || webviewId == githubControlCenter.mine) && webviewSection == pr",
           "group": "3_manage@2"
         }
       ],

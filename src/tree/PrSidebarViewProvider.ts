@@ -28,11 +28,13 @@ export interface IFileNode {
 export interface ISidebarActions {
   loadFiles(pr: IPullRequest): Promise<IPrFile[]>;
   getLayout(): FilesLayout;
+  getFavoriteRepos(): string[];
   onSignIn(): void;
   onOpenPrDetails(pr: IPullRequest): void;
   onOpenPrExternal(pr: IPullRequest): void;
   onCopyPrUrl(pr: IPullRequest): void;
   onCheckoutPr(pr: IPullRequest): void;
+  onToggleFavoriteRepo(repo: string): Promise<void> | void;
   onOpenFileDiff(node: IFileNode): void;
   onToggleFileViewed(node: IFileNode, viewed: boolean): Promise<void>;
   onError(message: string): void;
@@ -53,6 +55,7 @@ type SidebarWebviewMessage =
   | { command: "openPrExternal"; prId: string }
   | { command: "copyPrUrl"; prId: string }
   | { command: "checkoutPr"; prId: string }
+  | { command: "toggleFavoriteRepo"; repo: string }
   | { command: "togglePrExpand"; prId: string }
   | { command: "retryLoadFiles"; prId: string }
   | { command: "openFileDiff"; prId: string; filePath: string }
@@ -280,6 +283,12 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "toggleFavoriteRepo": {
+        if (typeof message.repo === "string" && message.repo.trim().length > 0) {
+          await this.actions.onToggleFavoriteRepo(message.repo);
+        }
+        return;
+      }
       case "togglePrExpand": {
         const pr = this.findPr(message.prId);
         if (!pr) {
@@ -390,6 +399,12 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildRepoGroups(strings: ISidebarStrings, layout: FilesLayout, now: number): ISidebarRepoGroupView[] {
+    const favoriteRepos = new Set(
+      this.actions
+        .getFavoriteRepos()
+        .map((entry) => entry.trim().toLowerCase())
+        .filter((entry) => entry.length > 0),
+    );
     const prsByRepo = new Map<string, IPullRequest[]>();
     for (const pr of this.prs) {
       const repoPrs = prsByRepo.get(pr.repo) ?? [];
@@ -397,11 +412,17 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
       prsByRepo.set(pr.repo, repoPrs);
     }
     return [...prsByRepo.entries()]
-      .sort(([firstRepo], [secondRepo]) => firstRepo.localeCompare(secondRepo))
       .map(([repo, repoPrs]) => ({
         repo,
+        favorite: favoriteRepos.has(repo.toLowerCase()),
         prs: repoPrs.map((pr) => this.toPrView(pr, strings, layout, now)),
-      }));
+      }))
+      .sort((first, second) => {
+        if (first.favorite !== second.favorite) {
+          return first.favorite ? -1 : 1;
+        }
+        return first.repo.localeCompare(second.repo);
+      });
   }
 
   private toPrView(pr: IPullRequest, strings: ISidebarStrings, layout: FilesLayout, now: number): ISidebarPrView {
