@@ -23,9 +23,19 @@ export interface IDetailsSessionPanel {
   postImageResolution(result: IImageResolution): void;
 }
 
+export interface IAuthSessionLike {
+  accessToken: string;
+  id?: string;
+  account?: { id?: string };
+}
+
+function toSessionKey(session: IAuthSessionLike): string {
+  return `${session.id ?? session.account?.id ?? ""}\0${session.accessToken}`;
+}
+
 export interface IDetailsSessionDeps {
   panel: IDetailsSessionPanel;
-  getSession(createIfNone: boolean): PromiseLike<{ accessToken: string } | undefined>;
+  getSession(createIfNone: boolean): PromiseLike<IAuthSessionLike | undefined>;
   fetchPrDetails(token: string, prId: string, headRefName: string): Promise<IPrDetails>;
   fetchFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes>;
   loadPrFiles(pr: IPullRequest): Promise<IPrFile[]>;
@@ -71,6 +81,7 @@ type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | 
 export class DetailsSession {
   private readonly strings = createDetailsSessionStrings();
   private readonly detailsCache = new Map<string, IPrDetails>();
+  private activeSessionKey: string | undefined;
   private currentDetailsPr: IPullRequest | undefined;
   // paired with the PR it belongs to: currentDetailsPr can move (poll re-point) while a fetch is
   // still in flight, so anything combining details with PR data must check the prId matches
@@ -79,6 +90,8 @@ export class DetailsSession {
   // details or the brief changed — comparing details alone would strand a finished brief
   private lastRenderedBrief: string | undefined;
   private detailsRequestSequence = 0;
+  private detailsRefreshSequence = 0;
+  private disposed = false;
   private mutationInFlight = false;
   // a confirmation modal is open: the webview has already frozen its buttons but mutationInFlight
   // is not set yet — a silent re-render here would unfreeze them under the still-open dialog
@@ -99,29 +112,40 @@ export class DetailsSession {
   constructor(private readonly deps: IDetailsSessionDeps) {}
 
   async openPrDetails(pr: IPullRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     this.currentDetailsPr = pr;
     this.ensureAiDetected(); // first panel open triggers the one-time CLI probe
     this.composerHasText = false; // every user-initiated render starts from an empty composer
     const requestId = ++this.detailsRequestSequence;
+    const refreshId = ++this.detailsRefreshSequence;
+    const session = await this.deps.getSession(false);
+    if (this.disposed || requestId !== this.detailsRequestSequence) {
+      return;
+    }
+    if (!session) {
+      this.clearDetailsCache();
+      this.currentDetails = undefined;
+      this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToLoad);
+      return;
+    }
+    const nextSessionKey = toSessionKey(session);
+    if (this.activeSessionKey !== undefined && this.activeSessionKey !== nextSessionKey) {
+      // Account switched: drop previous account's cached details without dropping this open request
+      this.detailsCache.clear();
+    }
+    this.activeSessionKey = nextSessionKey;
+
     const cached = this.getCachedDetails(pr.id);
     if (cached) {
       this.presentDetails(pr, cached, "reveal");
     } else {
       this.deps.panel.showLoading(formatPrTabTitle(pr));
     }
-    const session = await this.deps.getSession(false);
-    if (requestId !== this.detailsRequestSequence) {
-      return;
-    }
-    if (!session) {
-      this.detailsCache.clear();
-      this.currentDetails = undefined;
-      this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToLoad);
-      return;
-    }
     try {
       const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
-      if (requestId !== this.detailsRequestSequence) {
+      if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       this.cacheDetails(pr.id, details);
@@ -134,7 +158,7 @@ export class DetailsSession {
       }
       this.presentDetails(pr, details, "silent");
     } catch (error) {
-      if (requestId !== this.detailsRequestSequence) {
+      if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       if (cached) {
@@ -149,22 +173,34 @@ export class DetailsSession {
   // the request sequence without bumping it (a user click mid-fetch always wins), never reveals
   // the panel, and failures stay silent — the last good render must survive
   async refreshOpenDetails(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const pr = this.currentDetailsPr;
     if (!pr || !this.canSilentlyUpdatePanel()) {
       return;
     }
     const requestId = this.detailsRequestSequence;
-    const session = await this.deps.getSession(false);
-    if (!session) {
-      this.detailsCache.clear();
-      return;
-    }
-    if (requestId !== this.detailsRequestSequence) {
-      return;
-    }
+    const refreshId = ++this.detailsRefreshSequence;
     try {
+      const session = await this.deps.getSession(false);
+      if (this.disposed) {
+        return;
+      }
+      if (!session) {
+        this.clearDetailsCache();
+        return;
+      }
+      if (requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
+        return;
+      }
+      const nextSessionKey = toSessionKey(session);
+      if (this.activeSessionKey !== undefined && this.activeSessionKey !== nextSessionKey) {
+        this.detailsCache.clear();
+      }
+      this.activeSessionKey = nextSessionKey;
       const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
-      if (requestId !== this.detailsRequestSequence) {
+      if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       this.cacheDetails(pr.id, details);
@@ -173,6 +209,9 @@ export class DetailsSession {
       }
       this.presentDetails(pr, details, "silent");
     } catch (error) {
+      if (this.disposed) {
+        return;
+      }
       this.deps.log(`[${new Date().toISOString()}] Details refresh failed: ${toDiagnosticMessage(error)}`);
     }
   }
@@ -185,6 +224,9 @@ export class DetailsSession {
     if (file) {
       try {
         const session = await this.deps.getSession(false);
+        if (this.disposed || sequence !== this.detailsRequestSequence) {
+          return;
+        }
         if (session) {
           const dataUri = imageDataUri(file.path, await this.deps.fetchFileBytes(session.accessToken, file.repo, file.path, file.ref));
           if (dataUri) {
@@ -197,7 +239,7 @@ export class DetailsSession {
         }
       }
     }
-    if (sequence === this.detailsRequestSequence) {
+    if (!this.disposed && sequence === this.detailsRequestSequence) {
       this.deps.panel.postImageResolution(result);
     }
   }
@@ -218,6 +260,9 @@ export class DetailsSession {
   // unconditionally, BEFORE the mutation-in-flight guard: typing during a mutation must still
   // update the flag, or a background refresh could wipe an active draft while it looks idle.
   handleMessage(message: IPanelMessage): void {
+    if (this.disposed) {
+      return;
+    }
     if (message.command === "composerState") {
       this.composerHasText = message.hasText;
       return;
@@ -260,11 +305,20 @@ export class DetailsSession {
   }
 
   clearDetailsCache(): void {
+    this.detailsRequestSequence += 1;
+    this.detailsRefreshSequence += 1;
     this.detailsCache.clear();
+    this.activeSessionKey = undefined;
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.detailsRequestSequence += 1;
+    this.detailsRefreshSequence += 1;
+    this.aiDetectSequence += 1;
     clearTimeout(this.postMutationTimer);
+    this.detailsCache.clear();
+    this.activeSessionKey = undefined;
   }
 
   private getCachedDetails(prId: string): IPrDetails | undefined {
@@ -381,23 +435,40 @@ export class DetailsSession {
     this.rerenderBriefFor(pr.id); // shows "Summarizing…"
     try {
       const [files, patches] = await Promise.all([this.deps.loadPrFiles(pr), this.deps.ensurePatches(pr)]);
+      if (this.disposed) {
+        return;
+      }
       const config = this.deps.aiConfig();
       const prompt = buildBriefPrompt(details.details, files, patches);
       const summary = await this.deps.runAiPrompt(config.command, config.model, buildBriefSystemPrompt(config.language), prompt);
+      if (this.disposed) {
+        return;
+      }
       this.deps.briefStore.complete(pr.id, pr.headRefOid, summary);
       this.deps.persistBriefs();
     } catch (error) {
+      if (this.disposed) {
+        return;
+      }
       this.deps.briefStore.fail(pr.id, pr.headRefOid, toErrorMessage(error));
       this.deps.log(`[${new Date().toISOString()}] Brief failed: ${toDiagnosticMessage(error)}`);
     } finally {
-      this.rerenderBriefFor(pr.id);
+      if (!this.disposed) {
+        this.rerenderBriefFor(pr.id);
+      }
     }
   }
 
   private async runPrMutation(pr: IPullRequest, actionLabel: string, successMessage: string, mutate: (token: string) => Promise<void>): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const session = await this.deps.getSession(false);
+    if (this.disposed) {
+      return;
+    }
     if (!session) {
-      this.detailsCache.clear();
+      this.clearDetailsCache();
       this.currentDetails = undefined;
       this.composerHasText = false; // this render drops the composer too
       this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToAct);
@@ -406,16 +477,25 @@ export class DetailsSession {
     this.mutationInFlight = true;
     try {
       await mutate(session.accessToken);
+      if (this.disposed) {
+        return;
+      }
       this.deps.notify.info(successMessage);
       void this.deps.refresh();
       void this.openPrDetails(pr);
       // GitHub reads lag behind writes (search index, review decision): the immediate refreshes
       // above often return stale data, so schedule one delayed catch-up pass
       clearTimeout(this.postMutationTimer);
-      this.postMutationTimer = setTimeout(() => void this.deps.refresh(), POST_MUTATION_REFRESH_DELAY_MS);
+      this.postMutationTimer = setTimeout(() => {
+        if (!this.disposed) {
+          void this.deps.refresh();
+        }
+      }, POST_MUTATION_REFRESH_DELAY_MS);
     } catch (error) {
-      this.deps.notify.error(this.strings.actionFailed(actionLabel, toErrorMessage(error)));
-      this.deps.panel.reenableActions();
+      if (!this.disposed) {
+        this.deps.notify.error(this.strings.actionFailed(actionLabel, toErrorMessage(error)));
+        this.deps.panel.reenableActions();
+      }
     } finally {
       this.mutationInFlight = false;
     }
@@ -536,7 +616,9 @@ export class DetailsSession {
       return;
     }
     await this.deps.checkout(details.repo, details.headRefName);
-    this.deps.panel.reenableActions();
+    if (!this.disposed) {
+      this.deps.panel.reenableActions();
+    }
   }
 
   // probe the CLI once, lazily, on the first panel that could show the brief button
@@ -560,8 +642,8 @@ export class DetailsSession {
       return;
     }
     void this.deps.detectAi(config.command).then((available) => {
-      if (requestId !== this.aiDetectSequence) {
-        return; // a newer detection (or a backend switch) owns the flag now
+      if (this.disposed || requestId !== this.aiDetectSequence) {
+        return; // disposed or a newer detection (or a backend switch) owns the flag now
       }
       this.aiAvailable = available;
       if (this.currentDetailsPr) {

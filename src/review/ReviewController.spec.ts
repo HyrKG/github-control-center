@@ -130,4 +130,47 @@ describe("ReviewController Markdown image context", () => {
     await expect(controller2.reload(pr)).rejects.toThrow("patch failed");
     expect(createCommentThread).not.toHaveBeenCalled();
   });
+
+  it("does not create orphan CommentThreads if disposed while reload is in flight", async () => {
+    const createCommentThread = vi.fn((uri: vscode.Uri) => ({ uri, comments: [], dispose: vi.fn() }));
+    const controllerDispose = vi.fn();
+    vi.mocked(vscode.comments.createCommentController).mockReturnValue({
+      createCommentThread,
+      dispose: controllerDispose,
+    } as unknown as ReturnType<typeof vscode.comments.createCommentController>);
+
+    let resolvePatch!: (value: { path: string; previousPath?: string } | undefined) => void;
+    const getPatch = vi.fn(
+      () => new Promise<{ path: string; previousPath?: string } | undefined>((resolve) => { resolvePatch = resolve; }),
+    );
+    const onPendingChanged = vi.fn();
+    vi.mocked(fetchReviewThreads).mockResolvedValueOnce({
+      threads: [{
+        id: "t1",
+        path: "a.ts",
+        line: 3,
+        startLine: null,
+        side: "LEFT",
+        startSide: null,
+        isResolved: false,
+        isOutdated: false,
+        subjectType: "LINE",
+        comments: [{ id: "c1", author: "octocat", bodyMarkdown: "note", isPending: false, createdAt: "2026-01-01" }],
+      }],
+      pendingReviewId: "rev1",
+      pendingCommentCount: 1,
+    });
+    const controller = new ReviewController({ getToken: async () => "token", getPatch, onPendingChanged });
+
+    const reloading = controller.reload(pr);
+    await vi.waitFor(() => expect(getPatch).toHaveBeenCalledTimes(1));
+
+    controller.dispose();
+    resolvePatch({ path: "a.ts", previousPath: "old-a.ts" });
+    await reloading;
+
+    expect(controllerDispose).toHaveBeenCalledOnce();
+    expect(createCommentThread).not.toHaveBeenCalled();
+    expect(onPendingChanged).not.toHaveBeenCalled();
+  });
 });

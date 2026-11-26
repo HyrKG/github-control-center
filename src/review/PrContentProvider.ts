@@ -30,6 +30,10 @@ export class PrContentProvider implements vscode.TextDocumentContentProvider {
     });
   }
 
+  clear(): void {
+    this.cache.clear();
+  }
+
   // fetch errors intentionally propagate: opening a diff is user-initiated,
   // so the editor surfaces the failure (unlike the silent poll loop)
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {

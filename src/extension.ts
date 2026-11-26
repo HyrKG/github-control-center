@@ -85,15 +85,43 @@ export function activate(context: vscode.ExtensionContext): void {
     maxEntryBytes: MAX_IMAGE_BYTES,
     sizeOf: (file) => file.bytes.byteLength,
   });
+  let activeSessionKey: string | undefined;
+
+  function toSessionKey(session: { accessToken: string; id?: string; account?: { id?: string } }): string {
+    return `${session.id ?? session.account?.id ?? ""}\0${session.accessToken}`;
+  }
+
+  function clearSessionCaches(): void {
+    imageBytesCache.clear();
+    contentProvider.clear();
+    fileListCache.clear();
+    patchCache.clear();
+    detailsSession.clearDetailsCache();
+  }
+
+  function syncAuthSession(session: vscode.AuthenticationSession | undefined): void {
+    if (!session) {
+      activeSessionKey = undefined;
+      clearSessionCaches();
+      return;
+    }
+    const nextKey = toSessionKey(session);
+    if (activeSessionKey !== undefined && activeSessionKey !== nextKey) {
+      clearSessionCaches();
+    }
+    activeSessionKey = nextKey;
+  }
 
   function loadFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes> {
     // Only commit-SHA refs are immutable; branch/tag refs deduplicate in-flight loads without persisting
     const persist = FULL_SHA_PATTERN.test(ref);
-    return imageBytesCache.load(`${repo}\0${ref}\0${path}`, () => fetchFileBytes(token, repo, path, ref), { persist });
+    // Scope the cache key by access token so account switches can never cross-serve cached images
+    return imageBytesCache.load(`${token}\0${repo}\0${ref}\0${path}`, () => fetchFileBytes(token, repo, path, ref), { persist });
   }
 
   async function requireToken(): Promise<string> {
     const session = await getSession(false);
+    syncAuthSession(session);
     if (!session) {
       throw new LocalizedError("Sign in to GitHub first", vscode.l10n.t("Sign in to GitHub first"));
     }
@@ -300,8 +328,8 @@ export function activate(context: vscode.ExtensionContext): void {
         output.appendLine(`[${new Date().toISOString()}] Review threads load failed: ${toDiagnosticMessage(error)}`);
       });
       let previousPath: string | undefined;
-      if (file.changeType === "RENAMED" || file.changeType === "COPIED") {
-        // renames/copies need previous_filename for the LEFT path before building the URIs
+      if (file.changeType === "RENAMED" || file.changeType === "COPIED" || node.stale) {
+        // renames/copies (and stale file entries mid-refresh) need previous_filename for the LEFT path before building URIs
         const patches = await ensurePatches(pr);
         previousPath = patches.get(file.path)?.previousPath;
       } else {
@@ -652,18 +680,20 @@ export function activate(context: vscode.ExtensionContext): void {
   let refreshQueued = false;
 
   async function runRefreshPass(): Promise<void> {
-    const session = await getSession(false);
-    await vscode.commands.executeCommand("setContext", "githubControlCenter.signedIn", Boolean(session));
-    if (!session) {
-      toReviewProvider.clear();
-      reviewedProvider.clear();
-      mineProvider.clear();
-      toReviewProvider.setBadge(undefined);
-      detailsSession.clearDetailsCache();
-      lastSuccessfulRefreshAt = undefined;
-      return;
-    }
+    let hasSession = false;
     try {
+      const session = await getSession(false);
+      syncAuthSession(session);
+      await vscode.commands.executeCommand("setContext", "githubControlCenter.signedIn", Boolean(session));
+      if (!session) {
+        toReviewProvider.clear();
+        reviewedProvider.clear();
+        mineProvider.clear();
+        toReviewProvider.setBadge(undefined);
+        lastSuccessfulRefreshAt = undefined;
+        return;
+      }
+      hasSession = true;
       // the overlay rewrites the raw snapshot, so panel re-pointing, filters, providers, badge
       // and trackers all see the same optimistic world until GitHub's search index catches up
       const snapshot = approvalOverlay.apply(await fetchPullRequests(session.accessToken));
@@ -707,7 +737,9 @@ export function activate(context: vscode.ExtensionContext): void {
       pollScheduler.recordFailure(); // next cycle backs off (e.g. GitHub secondary rate limit)
     }
     // independent of the poll's own success/failure: refreshOpenDetails runs its own fetch
-    void detailsSession.refreshOpenDetails();
+    if (hasSession) {
+      void detailsSession.refreshOpenDetails();
+    }
   }
 
   function refresh(options?: { force?: boolean }): Promise<void> {
@@ -719,13 +751,22 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     refreshInFlight = (async () => {
       try {
-        do {
-          refreshQueued = false;
+        let shouldRun = true;
+        while (shouldRun) {
           await runRefreshPass();
-        } while (refreshQueued);
+          if (refreshQueued) {
+            refreshQueued = false;
+            shouldRun = true;
+          } else {
+            shouldRun = false;
+          }
+        }
       } finally {
-        refreshQueued = false;
         refreshInFlight = undefined;
+        if (refreshQueued && !disposed) {
+          refreshQueued = false;
+          void refresh({ force: true });
+        }
       }
     })();
     return refreshInFlight;
@@ -749,8 +790,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function pollCycle(): Promise<void> {
     clearTimeout(pollTimer);
-    await refresh();
-    scheduleNextPoll();
+    try {
+      await refresh();
+    } finally {
+      scheduleNextPoll();
+    }
   }
 
   context.subscriptions.push(
@@ -868,6 +912,9 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => detailsPanel.dispose() },
     vscode.authentication.onDidChangeSessions((event) => {
       if (event.provider.id === "github") {
+        activeSessionKey = undefined;
+        clearSessionCaches();
+        lastSuccessfulRefreshAt = undefined;
         void refresh({ force: true });
       }
     }),

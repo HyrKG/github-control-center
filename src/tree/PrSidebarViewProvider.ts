@@ -21,6 +21,8 @@ export interface IFileNode {
   kind: "file";
   pr: IPullRequest;
   file: IPrFile;
+  /** true when the cached file list was loaded for an older headRefOid than pr.headRefOid */
+  stale?: boolean;
 }
 
 export interface ISidebarActions {
@@ -66,6 +68,8 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
   private webviewReady = false;
   private pendingStateSync = false;
   private lastPostedSnapshotJson: string | undefined;
+  private inFlightSnapshotJson: string | undefined;
+  private postStateSeq = 0;
   private pendingBadge: vscode.ViewBadge | undefined;
   private signedIn = false;
   private prs: IPullRequest[] = [];
@@ -84,6 +88,8 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     this.webviewReady = false;
     this.pendingStateSync = false;
     this.lastPostedSnapshotJson = undefined;
+    this.inFlightSnapshotJson = undefined;
+    this.postStateSeq += 1;
     webviewView.badge = this.pendingBadge;
     webviewView.webview.options = {
       enableScripts: true,
@@ -106,6 +112,8 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
         this.webviewReady = false;
         this.pendingStateSync = false;
         this.lastPostedSnapshotJson = undefined;
+        this.inFlightSnapshotJson = undefined;
+        this.postStateSeq += 1;
       }
     });
   }
@@ -169,6 +177,9 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     if (!file) {
       return undefined;
     }
+    if (entry && entry.headRefOid !== pr.headRefOid) {
+      return { kind: "file", pr, file, stale: true };
+    }
     return { kind: "file", pr, file };
   }
 
@@ -182,21 +193,43 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postState(): void {
-    if (!this.view || !this.webviewReady) {
+    const view = this.view;
+    if (!view || !this.webviewReady) {
       return;
     }
-    if (this.view.visible === false) {
+    if (view.visible === false) {
       this.pendingStateSync = true;
       return;
     }
     this.pendingStateSync = false;
     const snapshot = this.buildSnapshot();
-    const snapshotJson = JSON.stringify(snapshot);
-    if (snapshotJson === this.lastPostedSnapshotJson) {
+    const serialized = JSON.stringify(snapshot);
+    const latestJson = this.inFlightSnapshotJson ?? this.lastPostedSnapshotJson;
+    if (serialized === latestJson) {
       return;
     }
-    this.lastPostedSnapshotJson = snapshotJson;
-    void this.view.webview.postMessage({ command: "state", snapshot });
+    const seq = ++this.postStateSeq;
+    this.inFlightSnapshotJson = serialized;
+    void Promise.resolve(view.webview.postMessage({ command: "state", snapshot })).then(
+      (delivered) => {
+        if (this.view !== view || this.postStateSeq !== seq) {
+          return;
+        }
+        this.inFlightSnapshotJson = undefined;
+        if (delivered === false) {
+          this.pendingStateSync = true;
+          return;
+        }
+        this.lastPostedSnapshotJson = serialized;
+      },
+      () => {
+        if (this.view !== view || this.postStateSeq !== seq) {
+          return;
+        }
+        this.inFlightSnapshotJson = undefined;
+        this.pendingStateSync = true;
+      },
+    );
   }
 
   private async handleMessage(message: SidebarWebviewMessage | null): Promise<void> {
@@ -206,6 +239,9 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     switch (message.command) {
       case "ready":
         this.webviewReady = true;
+        this.lastPostedSnapshotJson = undefined;
+        this.inFlightSnapshotJson = undefined;
+        this.pendingStateSync = false;
         this.postState();
         return;
       case "signIn":

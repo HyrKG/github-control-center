@@ -40,6 +40,7 @@ export class ReviewController implements vscode.Disposable {
   private readonly threadRefs = new Map<vscode.CommentThread, IThreadRef>();
   // ponytail: one review at a time — the last PR whose diff was opened; QuickPick over PRs if it ever hurts
   private activeReviewPr: IPullRequest | undefined;
+  private disposed = false;
 
   constructor(private readonly deps: IReviewControllerDeps) {
     this.controller = vscode.comments.createCommentController("githubControlCenter", "GitHub Control Center");
@@ -88,6 +89,9 @@ export class ReviewController implements vscode.Disposable {
   }
 
   async ensureThreadsForPr(pr: IPullRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     if (this.statesByPr.has(pr.id)) {
       this.publishPendingState(pr);
       return;
@@ -96,8 +100,17 @@ export class ReviewController implements vscode.Disposable {
   }
 
   async reload(pr: IPullRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const token = await this.deps.getToken();
+    if (this.disposed) {
+      return;
+    }
     const snapshot = await fetchReviewThreads(token, pr.id);
+    if (this.disposed) {
+      return;
+    }
     const state = this.statesByPr.get(pr.id) ?? { snapshot, vsThreads: new Map<string, vscode.CommentThread>() };
     const plan = syncThreads([...state.vsThreads.keys()], snapshot.threads);
 
@@ -120,6 +133,9 @@ export class ReviewController implements vscode.Disposable {
         return { thread, anchor, patch };
       }),
     );
+    if (this.disposed) {
+      return;
+    }
     for (const item of prepared) {
       if (!item) {
         continue;
@@ -193,11 +209,14 @@ export class ReviewController implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const state of this.statesByPr.values()) {
       for (const vsThread of state.vsThreads.values()) {
         vsThread.dispose();
       }
     }
+    this.statesByPr.clear();
+    this.threadRefs.clear();
     this.controller.dispose();
   }
 }

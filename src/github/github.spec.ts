@@ -292,6 +292,14 @@ describe("fetchPullRequests", () => {
 
     await expect(fetchPullRequests("token")).rejects.toThrow("Bad credentials");
   });
+
+  it.each(["TimeoutError", "AbortError"] as const)("should map GraphQL %s to a localized timeout error", async (errorName) => {
+    const abortError = new Error("signal timed out");
+    abortError.name = errorName;
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+
+    await expect(fetchPullRequests("token")).rejects.toThrow("GitHub GraphQL request timed out");
+  });
 });
 
 interface IDetailsNodeOverrides {

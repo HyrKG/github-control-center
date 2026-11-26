@@ -412,4 +412,77 @@ describe("PrSidebarViewProvider", () => {
     view.emitVisibilityChange(true);
     expect(view.webview.postMessage).not.toHaveBeenCalled();
   });
+
+  it("re-posts snapshot when webview reloads (ready) and recovers when postMessage returns false or rejects", async () => {
+    const view = createMockWebviewView({ includeVisibility: true, visible: true });
+    provider.setPrs([buildPr({ id: "PR_1", title: "Alpha" })]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+
+    // Webview reloads and emits ready again with unchanged data -> must re-post!
+    view.webview.emitMessage({ command: "ready" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(2);
+
+    // Next postMessage resolves to false (undelivered) -> must not latch dedup cache
+    view.webview.postMessage.mockResolvedValueOnce(false);
+    provider.setPrs([buildPr({ id: "PR_1", title: "Beta" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(3);
+
+    // Visibility restore (or refresh) retries delivering "Beta"
+    view.emitVisibilityChange(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(4);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Beta");
+
+    // Rejected postMessage also does not latch dedup cache
+    view.webview.postMessage.mockRejectedValueOnce(new Error("webview disposed"));
+    provider.setPrs([buildPr({ id: "PR_1", title: "Gamma" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(5);
+
+    provider.refresh();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(6);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Gamma");
+  });
+
+  it("marks file nodes as stale while a silent headRefOid refresh is still in flight", async () => {
+    const view = createMockWebviewView();
+    const file = buildFile({ path: "src/app.ts", changeType: "MODIFIED" });
+    actions.loadFiles.mockResolvedValueOnce([file]);
+    provider.setPrs([buildPr({ id: "PR_1", headRefOid: "oid-1" })]);
+    provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+    view.webview.emitMessage({ command: "ready" });
+    view.webview.emitMessage({ command: "togglePrExpand", prId: "PR_1" });
+    await vi.waitFor(() => expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-1" }),
+      file,
+    }));
+
+    // Poll brings new headRefOid while silent reload is pending
+    let resolveReload!: (files: IPrFile[]) => void;
+    actions.loadFiles.mockImplementationOnce(() => new Promise<IPrFile[]>((resolve) => { resolveReload = resolve; }));
+    provider.setPrs([buildPr({ id: "PR_1", headRefOid: "oid-2" })]);
+
+    expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-2" }),
+      file,
+      stale: true,
+    });
+
+    // Once silent reload finishes, the node is fresh again (no stale flag)
+    const freshFile = buildFile({ path: "src/app.ts", changeType: "RENAMED" });
+    resolveReload([freshFile]);
+    await vi.waitFor(() => expect(provider.findFileNode("PR_1", "src/app.ts")).toEqual({
+      kind: "file",
+      pr: expect.objectContaining({ headRefOid: "oid-2" }),
+      file: freshFile,
+    }));
+  });
 });

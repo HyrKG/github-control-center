@@ -113,4 +113,40 @@ describe("PrContentProvider", () => {
     await expect(provider.provideTextDocumentContent(uri)).resolves.toBe("recovered");
     expect(fetchContent).toHaveBeenCalledTimes(2);
   });
+
+  it("should drop cached entries and ignore stale in-flight responses after clear()", async () => {
+    let resolveStale!: (value: string) => void;
+    const fetchContent = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveStale = resolve; }))
+      .mockResolvedValueOnce("new account body");
+    const provider = new PrContentProvider(fetchContent);
+    const uri = toUri(buildRef());
+
+    const stale = provider.provideTextDocumentContent(uri);
+    provider.clear();
+    resolveStale("old account body");
+    await expect(stale).resolves.toBe("old account body");
+
+    await expect(provider.provideTextDocumentContent(uri)).resolves.toBe("new account body");
+    expect(fetchContent).toHaveBeenCalledTimes(2);
+  });
+
+  it("should measure multi-byte UTF-8 bodies by byte length when enforcing the cache budget", async () => {
+    // Each CJK char is 3 UTF-8 bytes -> "一二三" is 9 bytes; two of them (18 bytes) exceed budget 12
+    const fetchContent = vi.fn(async (ref: IPrFileRef) => (ref.path === "a.ts" ? "一二三" : "四五六"));
+    const provider = new PrContentProvider(fetchContent, 12);
+    const uriA = toUri(buildRef({ path: "a.ts" }));
+    const uriB = toUri(buildRef({ path: "b.ts" }));
+
+    await provider.provideTextDocumentContent(uriA);
+    await provider.provideTextDocumentContent(uriB); // evicts uriA because 9 + 9 > 12
+
+    fetchContent.mockClear();
+    await provider.provideTextDocumentContent(uriB);
+    expect(fetchContent).not.toHaveBeenCalled();
+
+    await provider.provideTextDocumentContent(uriA);
+    expect(fetchContent).toHaveBeenCalledTimes(1);
+  });
 });

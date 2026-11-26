@@ -109,4 +109,71 @@ describe("BoundedAsyncCache", () => {
     await expect(cache.load("branch-ref", create, { persist: false })).resolves.toBe("v2");
     expect(create).toHaveBeenCalledTimes(2);
   });
+
+  it("clears entries and blocks stale in-flight loads from backfilling or deleting new-epoch inflight entries", async () => {
+    const cache = new BoundedAsyncCache<string>({
+      maxBytes: 100,
+      maxEntryBytes: 50,
+      sizeOf: (value) => Buffer.byteLength(value, "utf8"),
+    });
+    let resolveStale!: (value: string) => void;
+    let resolveFresh!: (value: string) => void;
+    const staleCreate = vi.fn(() => new Promise<string>((resolve) => { resolveStale = resolve; }));
+    const freshCreate = vi.fn(() => new Promise<string>((resolve) => { resolveFresh = resolve; }));
+
+    const stalePromise = cache.load("k", staleCreate);
+    cache.clear();
+
+    // Start a fresh load in the new epoch while stale load is still pending
+    const freshPromise1 = cache.load("k", freshCreate);
+    resolveStale("stale-value");
+    await expect(stalePromise).resolves.toBe("stale-value");
+
+    // Stale load settling must NOT have deleted freshPromise1 from inflight or backfilled entries
+    const freshPromise2 = cache.load("k", freshCreate);
+    expect(freshCreate).toHaveBeenCalledTimes(1);
+
+    resolveFresh("fresh-value");
+    await expect(freshPromise1).resolves.toBe("fresh-value");
+    await expect(freshPromise2).resolves.toBe("fresh-value");
+
+    // Cache holds the fresh value, not the stale one
+    const verifyCreate = vi.fn(async () => "unexpected");
+    await expect(cache.load("k", verifyCreate)).resolves.toBe("fresh-value");
+    expect(verifyCreate).not.toHaveBeenCalled();
+
+    // Clearing removes cached entries so the next load re-fetches
+    cache.clear();
+    const afterClearCreate = vi.fn(async () => "reloaded");
+    await expect(cache.load("k", afterClearCreate)).resolves.toBe("reloaded");
+    expect(afterClearCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces byte budgets accurately for multi-byte UTF-8 strings", async () => {
+    const cache = new BoundedAsyncCache<string>({
+      maxBytes: 12,
+      maxEntryBytes: 9,
+      sizeOf: (value) => Buffer.byteLength(value, "utf8"),
+    });
+    // Each CJK char is 3 UTF-8 bytes: "你好世界" is 4 chars / 12 bytes (> maxEntryBytes 9)
+    const oversized = vi.fn(async () => "你好世界");
+    const first = vi.fn(async () => "你好"); // 6 bytes
+    const second = vi.fn(async () => "世界"); // 6 bytes
+    const third = vi.fn(async () => "测试"); // 6 bytes -> evicts "你好"
+
+    await cache.load("oversized", oversized);
+    await cache.load("oversized", oversized);
+    expect(oversized).toHaveBeenCalledTimes(2);
+
+    await cache.load("a", first);
+    await cache.load("b", second);
+    await cache.load("c", third);
+
+    await cache.load("b", second);
+    await cache.load("c", third);
+    await cache.load("a", first);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(third).toHaveBeenCalledTimes(1);
+    expect(first).toHaveBeenCalledTimes(2);
+  });
 });

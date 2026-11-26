@@ -4,6 +4,7 @@ import { chineseBundle, setTestLocale } from "./core/localizationTestUtils";
 import type { IPullRequest, IReviewThreadsSnapshot } from "./core/types";
 import { activate } from "./extension";
 import * as github from "./github/github";
+import { toPrUri } from "./review/PrContentProvider";
 
 vi.mock("./github/github", async (importOriginal) => ({
   ...await importOriginal<typeof github>(),
@@ -12,6 +13,7 @@ vi.mock("./github/github", async (importOriginal) => ({
   fetchPrDetails: vi.fn(),
   fetchPrFiles: vi.fn().mockResolvedValue([]),
   fetchFileBytes: vi.fn(),
+  fetchFileContent: vi.fn().mockResolvedValue("file content"),
   fetchPrFilePatches: vi.fn().mockResolvedValue([]),
   fetchReviewThreads: vi.fn(),
   submitPendingReview: vi.fn().mockResolvedValue(undefined),
@@ -44,6 +46,8 @@ const host = vi.hoisted(() => {
   const globalStateStore = new Map<string, unknown>();
   const clipboardWriteText = vi.fn();
   let onWindowStateChange: ((state: { focused: boolean }) => void) | undefined;
+  let onSessionsChange: ((event: { provider: { id: string } }) => void) | undefined;
+  let contentProvider: vscode.TextDocumentContentProvider | undefined;
 
   return {
     registered,
@@ -59,6 +63,16 @@ const host = vi.hoisted(() => {
       host.window.state.focused = focused;
       onWindowStateChange?.({ focused });
     },
+    emitSessionsChange: (providerId: string) => {
+      onSessionsChange?.({ provider: { id: providerId } });
+    },
+    getContentProvider: () => contentProvider,
+    authentication: {
+      onDidChangeSessions: (cb: (event: { provider: { id: string } }) => void) => {
+        onSessionsChange = cb;
+        return subscription;
+      },
+    },
     commands: {
       registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
         registered.set(id, handler);
@@ -69,7 +83,10 @@ const host = vi.hoisted(() => {
     workspace: {
       getConfiguration: () => ({ get: <T>(_: string, fallback: T) => fallback, update: vi.fn().mockResolvedValue(undefined) }),
       onDidChangeConfiguration: () => subscription,
-      registerTextDocumentContentProvider: () => subscription,
+      registerTextDocumentContentProvider: (_scheme: string, provider: vscode.TextDocumentContentProvider) => {
+        contentProvider = provider;
+        return subscription;
+      },
     },
     window: {
       state: { focused: false },
@@ -129,6 +146,7 @@ vi.mock("vscode", async (importOriginal) => {
       clipboard: { writeText: host.clipboardWriteText },
     },
     comments: { createCommentController: () => ({ createCommentThread: host.createCommentThread, dispose: vi.fn() }) },
+    authentication: host.authentication,
     commands: host.commands,
     workspace: host.workspace,
     window: host.window,
@@ -206,7 +224,9 @@ describe("localized extension actions", () => {
     host.window.state.focused = false;
     host.globalStateStore.clear();
     setTestLocale("zh-cn", chineseBundle());
+    vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+    vi.mocked(github.fetchFileContent).mockResolvedValue("file content");
     vi.mocked(github.fetchPrFilePatches).mockResolvedValue([]);
     vi.mocked(github.fetchReviewThreads).mockResolvedValue(snapshot);
     activate({
@@ -489,6 +509,33 @@ describe("localized extension actions", () => {
         { preview: true },
       );
     });
+
+    // COPIED and stale file nodes also await patches to resolve previousPath
+    for (const [label, extra] of [
+      ["copied", { file: { path: "src/copied.ts", changeType: "COPIED" as const, additions: 1, deletions: 0, viewedState: "UNVIEWED" as const } }],
+      ["stale", { file: { path: "src/stale.ts", changeType: "MODIFIED" as const, additions: 1, deletions: 0, viewedState: "UNVIEWED" as const }, stale: true }],
+    ] as const) {
+      let resolveCasePatches!: (patches: Array<{ path: string; previousPath?: string }>) => void;
+      vi.mocked(github.fetchPrFilePatches).mockImplementationOnce(
+        () => new Promise((resolve) => { resolveCasePatches = resolve; }),
+      );
+      host.commands.executeCommand.mockClear();
+      const casePr = { ...pr, id: `p-${label}`, headRefOid: `head-${label}` };
+      void runCommand("openFileDiff", { pr: casePr, kind: "file", ...extra });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(host.commands.executeCommand).not.toHaveBeenCalledWith("vscode.diff", expect.anything(), expect.anything(), expect.anything(), expect.anything());
+
+      resolveCasePatches([{ path: extra.file.path, previousPath: `src/origin-${label}.ts` }]);
+      await vi.waitFor(() => {
+        expect(host.commands.executeCommand).toHaveBeenCalledWith(
+          "vscode.diff",
+          expect.objectContaining({ scheme: "ghcc-pr", path: `/src/origin-${label}.ts` }),
+          expect.objectContaining({ scheme: "ghcc-pr", path: `/${extra.file.path}` }),
+          expect.any(String),
+          { preview: true },
+        );
+      });
+    }
   });
 
   it("shares LRU image bytes across preview and details for 40-char SHAs while avoiding stale persistence for branch refs", async () => {
@@ -590,6 +637,61 @@ describe("localized extension actions", () => {
     // Multiple forced calls while in-flight coalesced into exactly one follow-up pass
     expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
   });
+
+  it("clears image and content caches on GitHub session change so accounts never cross-serve cached data", async () => {
+    const headSha = "c".repeat(40);
+    const baseSha = "d".repeat(40);
+    const shaPr: IPullRequest = { ...pr, id: "p-acct", baseRefOid: baseSha, headRefOid: headSha };
+    vi.mocked(github.getSession).mockResolvedValue({ id: "acct-a", accessToken: "token-a" } as vscode.AuthenticationSession);
+    vi.mocked(github.fetchFileBytes)
+      .mockResolvedValueOnce({ bytes: Uint8Array.of(0x89, 0x50, 0x4e, 0x47), contentType: "image/png" })
+      .mockResolvedValueOnce({ bytes: Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x01), contentType: "image/png" });
+    vi.mocked(github.fetchFileContent)
+      .mockResolvedValueOnce("account A secret")
+      .mockResolvedValueOnce("account B secret");
+
+    // Populate both image cache and content provider cache under Account A
+    await runCommand("openFileDiff", {
+      pr: shaPr,
+      file: { path: "docs/secret.png", changeType: "ADDED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    await vi.waitFor(() => expect(github.fetchFileBytes).toHaveBeenCalledTimes(1));
+
+    const provider = host.getContentProvider()!;
+    const uri = toPrUri({
+      prId: shaPr.id,
+      repo: shaPr.repo,
+      prNumber: shaPr.number,
+      path: "src/secret.ts",
+      sha: headSha,
+      headOid: headSha,
+      side: "RIGHT",
+      isEmpty: false,
+    });
+    await expect(provider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).resolves.toBe("account A secret");
+    expect(github.fetchFileContent).toHaveBeenCalledTimes(1);
+
+    // Switch GitHub session -> clears all caches immediately
+    vi.mocked(github.getSession).mockResolvedValue({ id: "acct-b", accessToken: "token-b" } as vscode.AuthenticationSession);
+    host.emitSessionsChange("github");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Account B must re-fetch both image and text content with token-b
+    const previewPanel = host.webviewPanels.find((panel) => panel.viewType === "githubControlCenter.prImagePreview");
+    previewPanel?.dispose();
+    await runCommand("openFileDiff", {
+      pr: shaPr,
+      file: { path: "docs/secret.png", changeType: "ADDED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    await vi.waitFor(() => expect(github.fetchFileBytes).toHaveBeenCalledTimes(2));
+    expect(github.fetchFileBytes).toHaveBeenLastCalledWith("token-b", shaPr.repo, "docs/secret.png", headSha);
+
+    await expect(provider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).resolves.toBe("account B secret");
+    expect(github.fetchFileContent).toHaveBeenCalledTimes(2);
+    expect(github.fetchFileContent).toHaveBeenLastCalledWith("token-b", shaPr.repo, "src/secret.ts", headSha);
+  });
 });
 
 describe("window focus cooldown", () => {
@@ -600,7 +702,9 @@ describe("window focus cooldown", () => {
     host.outputLines.length = 0;
     host.window.state.focused = true;
     host.globalStateStore.clear();
+    vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+    vi.mocked(github.fetchFileContent).mockResolvedValue("file content");
     vi.mocked(github.fetchPrFilePatches).mockResolvedValue([]);
     vi.mocked(github.fetchReviewThreads).mockResolvedValue(snapshot);
   });
@@ -659,6 +763,29 @@ describe("window focus cooldown", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     host.emitWindowState(true);
     await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the poll loop alive and executes queued forced refreshes even when getSession rejects", async () => {
+    let rejectFirstSession!: (error: Error) => void;
+    vi.mocked(github.getSession)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirstSession = reject; }))
+      .mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
+
+    activateFresh();
+    // Queue a forced refresh while the initial poll's getSession is pending
+    void runCommand("refresh");
+
+    // Reject the initial getSession -> must log failure, still run the queued forced refresh, and keep polling
+    rejectFirstSession(new Error("auth provider offline"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(host.outputLines.some((line) => line.includes("auth provider offline"))).toBe(true);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(1);
+
+    // Advance past the next scheduled poll interval (150s base) to verify the poll timer survived
+    await vi.advanceTimersByTimeAsync(150_000);
     expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
   });
 });

@@ -200,11 +200,10 @@ describe("DetailsSession", () => {
       deps.panel.updateDetails.mockClear();
 
       const reopen = session.openPrDetails(pr);
-      // Immediately revealed from cache without showing loading
+      await flush(); // getSession resolves first; cached details reveal immediately while fetchPrDetails is still pending
       expect(deps.panel.showLoading).not.toHaveBeenCalled();
       expect(deps.panel.showDetails).toHaveBeenCalledExactlyOnceWith(cached, undefined);
 
-      await flush();
       resolveRevalidate(buildDetails({ title: "Cached" }));
       await reopen;
 
@@ -266,7 +265,7 @@ describe("DetailsSession", () => {
       expect(deps.log).toHaveBeenCalledWith(expect.stringContaining("offline"));
     });
 
-    it("clears cached details and shows sign-in message when session disappears", async () => {
+    it("clears cached details without flashing old PR details when session disappears", async () => {
       const pr = buildPr({ id: "A" });
       const deps = buildDeps();
       deps.getSession = vi
@@ -278,14 +277,113 @@ describe("DetailsSession", () => {
 
       await session.openPrDetails(pr);
       deps.panel.showLoading.mockClear();
+      deps.panel.showDetails.mockClear();
       deps.panel.showMessage.mockClear();
 
       await session.openPrDetails(pr);
+      expect(deps.panel.showDetails).not.toHaveBeenCalled();
       expect(deps.panel.showMessage).toHaveBeenCalledWith(expect.any(String), "Sign in to GitHub to load pull request details.");
 
       // Cache was cleared on sign-out, so the next open after signing back in shows loading
       await session.openPrDetails(pr);
       expect(deps.panel.showLoading).toHaveBeenCalledTimes(1);
+    });
+
+    it("clears cached details without flashing old account data when switching accounts and blocks stale backfill", async () => {
+      const pr = buildPr({ id: "A" });
+      const accountADetails = buildDetails({ title: "Private PR A" });
+      const accountBDetails = buildDetails({ title: "Private PR B" });
+      let resolveInFlightA!: (details: IPrDetails) => void;
+      const deps = buildDeps();
+      deps.getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "s1", accessToken: "token-a" })
+        .mockResolvedValueOnce({ id: "s1", accessToken: "token-a" })
+        .mockResolvedValueOnce({ id: "s2", accessToken: "token-b" });
+      deps.fetchPrDetails = vi
+        .fn()
+        .mockResolvedValueOnce(accountADetails)
+        .mockImplementationOnce(() => new Promise<IPrDetails>((resolve) => { resolveInFlightA = resolve; }))
+        .mockResolvedValueOnce(accountBDetails);
+      const session = new DetailsSession(deps);
+
+      // Account A loads and caches PR A
+      await session.openPrDetails(pr);
+      // Account A starts a revalidation that hangs
+      const inflightRevalidate = session.openPrDetails(pr);
+      await flush();
+
+      // Explicit cache clear (e.g. session change) invalidates in-flight A request
+      session.clearDetailsCache();
+      deps.panel.showLoading.mockClear();
+      deps.panel.showDetails.mockClear();
+      deps.panel.updateDetails.mockClear();
+
+      // Stale A response arrives after clearDetailsCache -> must neither render nor backfill cache
+      resolveInFlightA(buildDetails({ title: "Stale A Backfill" }));
+      await inflightRevalidate;
+      expect(deps.panel.updateDetails).not.toHaveBeenCalled();
+
+      // Account B opens the same PR id -> must NOT flash Account A's details; shows loading then loads B
+      await session.openPrDetails(pr);
+      expect(deps.panel.showLoading).toHaveBeenCalledTimes(1);
+      expect(deps.panel.showDetails).toHaveBeenCalledExactlyOnceWith(accountBDetails, undefined);
+    });
+
+    it("drops an out-of-order slower revalidation so it never overwrites a newer refreshOpenDetails snapshot", async () => {
+      const pr = buildPr({ id: "A" });
+      const cached = buildDetails({ title: "v0 cached" });
+      const slowRevalidate = buildDetails({ title: "v1 slow" });
+      const fastPoll = buildDetails({ title: "v2 fresh" });
+      let resolveSlow!: (details: IPrDetails) => void;
+      const deps = buildDeps();
+      deps.fetchPrDetails = vi
+        .fn()
+        .mockResolvedValueOnce(cached)
+        .mockImplementationOnce(() => new Promise<IPrDetails>((resolve) => { resolveSlow = resolve; }))
+        .mockResolvedValueOnce(fastPoll);
+      const session = new DetailsSession(deps);
+
+      await session.openPrDetails(pr);
+      deps.panel.updateDetails.mockClear();
+
+      // Start SWR revalidation (call 2, slow)
+      const reopen = session.openPrDetails(pr);
+      await flush();
+
+      // Newer poll refreshOpenDetails (call 3, fast) completes first with v2
+      await session.refreshOpenDetails();
+      expect(deps.panel.updateDetails).toHaveBeenCalledExactlyOnceWith(fastPoll, undefined);
+
+      // Slow SWR revalidation (v1) finishes later -> must be dropped and must not overwrite panel or cache
+      deps.panel.updateDetails.mockClear();
+      resolveSlow(slowRevalidate);
+      await reopen;
+      expect(deps.panel.updateDetails).not.toHaveBeenCalled();
+
+      // Re-opening proves the cache still holds v2, not v1
+      deps.panel.showDetails.mockClear();
+      deps.fetchPrDetails.mockResolvedValueOnce(fastPoll);
+      await session.openPrDetails(pr);
+      expect(deps.panel.showDetails).toHaveBeenCalledExactlyOnceWith(fastPoll, undefined);
+    });
+
+    it("ignores late async responses after dispose()", async () => {
+      const pr = buildPr({ id: "A" });
+      let resolveFetch!: (details: IPrDetails) => void;
+      const deps = buildDeps();
+      deps.fetchPrDetails = vi.fn(() => new Promise<IPrDetails>((resolve) => { resolveFetch = resolve; }));
+      const session = new DetailsSession(deps);
+
+      const opening = session.openPrDetails(pr);
+      await flush();
+      session.dispose();
+
+      resolveFetch(buildDetails({ title: "After dispose" }));
+      await opening;
+
+      expect(deps.panel.showDetails).not.toHaveBeenCalled();
+      expect(deps.panel.updateDetails).not.toHaveBeenCalled();
     });
 
     it("updates cache on refreshOpenDetails and evicts least-recently-used PRs past 30 entries", async () => {

@@ -23,8 +23,16 @@ export class BoundedAsyncCache<TValue> {
   private readonly entries = new Map<string, ICacheEntry<TValue>>();
   private readonly inflight = new Map<string, Promise<TValue>>();
   private totalBytes = 0;
+  private epoch = 0;
 
   constructor(private readonly options: IBoundedAsyncCacheOptions<TValue>) {}
+
+  clear(): void {
+    this.epoch += 1;
+    this.entries.clear();
+    this.inflight.clear();
+    this.totalBytes = 0;
+  }
 
   load(key: string, create: () => Promise<TValue>, options?: ILoadOptions): Promise<TValue> {
     const persist = options?.persist ?? true;
@@ -43,6 +51,7 @@ export class BoundedAsyncCache<TValue> {
       return pending;
     }
 
+    const loadEpoch = this.epoch;
     let created: Promise<TValue>;
     try {
       created = create();
@@ -52,13 +61,15 @@ export class BoundedAsyncCache<TValue> {
 
     const promise = created
       .then((value) => {
-        if (persist) {
+        if (persist && this.epoch === loadEpoch) {
           this.set(key, value);
         }
         return value;
       })
       .finally(() => {
-        this.inflight.delete(key);
+        if (this.epoch === loadEpoch) {
+          this.inflight.delete(key);
+        }
       });
 
     this.inflight.set(key, promise);

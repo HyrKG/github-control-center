@@ -284,15 +284,26 @@ export function getSession(createIfNone: boolean): Thenable<vscode.Authenticatio
 const REQUEST_TIMEOUT_MS = 30_000;
 
 async function postGraphQl<TData>(token: string, query: string, variables?: Record<string, unknown>): Promise<TData> {
-  const response = await fetch(GRAPHQL_ENDPOINT, {
-    method: "POST",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(GRAPHQL_ENDPOINT, {
+      method: "POST",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new LocalizedError(
+        "GitHub GraphQL request timed out",
+        vscode.l10n.t("GitHub GraphQL request timed out"),
+      );
+    }
+    throw error;
+  }
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
     throw new LocalizedError(
