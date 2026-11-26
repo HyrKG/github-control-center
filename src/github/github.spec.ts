@@ -300,6 +300,20 @@ describe("fetchPullRequests", () => {
 
     await expect(fetchPullRequests("token")).rejects.toThrow("GitHub GraphQL request timed out");
   });
+
+  it("should map response.json() TimeoutError to a localized timeout error", async () => {
+    const timeoutError = new Error("body read timed out");
+    timeoutError.name = "TimeoutError";
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw timeoutError;
+      },
+    })));
+
+    await expect(fetchPullRequests("token")).rejects.toThrow("GitHub GraphQL request timed out");
+  });
 });
 
 interface IDetailsNodeOverrides {

@@ -536,6 +536,29 @@ describe("localized extension actions", () => {
         );
       });
     }
+
+    // Stale file node refreshes metadata from loadPrFiles (e.g. MODIFIED -> DELETED marks right side empty)
+    const staleDeletedPr = { ...pr, id: "p-stale-del", headRefOid: "head-stale-del" };
+    vi.mocked(github.fetchPrFilePatches).mockResolvedValueOnce([{ path: "src/removed.ts" }]);
+    vi.mocked(github.fetchPrFiles).mockResolvedValueOnce([
+      { path: "src/removed.ts", changeType: "DELETED", additions: 0, deletions: 10, viewedState: "UNVIEWED" },
+    ]);
+    host.commands.executeCommand.mockClear();
+    await runCommand("openFileDiff", {
+      pr: staleDeletedPr,
+      file: { path: "src/removed.ts", changeType: "MODIFIED", additions: 1, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+      stale: true,
+    });
+    await vi.waitFor(() => {
+      expect(host.commands.executeCommand).toHaveBeenCalledWith(
+        "vscode.diff",
+        expect.objectContaining({ scheme: "ghcc-pr", path: "/src/removed.ts" }),
+        expect.objectContaining({ scheme: "ghcc-pr", path: "/src/removed.ts", query: expect.stringContaining("empty=1") }),
+        expect.any(String),
+        { preview: true },
+      );
+    });
   });
 
   it("shares LRU image bytes across preview and details for 40-char SHAs while avoiding stale persistence for branch refs", async () => {
@@ -672,14 +695,13 @@ describe("localized extension actions", () => {
     await expect(provider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).resolves.toBe("account A secret");
     expect(github.fetchFileContent).toHaveBeenCalledTimes(1);
 
-    // Switch GitHub session -> clears all caches immediately
+    // Switch GitHub session -> clears all caches AND closes already-open PrImagePreview panels automatically
     vi.mocked(github.getSession).mockResolvedValue({ id: "acct-b", accessToken: "token-b" } as vscode.AuthenticationSession);
+    const previewPanelCountBeforeSwitch = host.webviewPanels.filter((panel) => panel.viewType === "githubControlCenter.prImagePreview").length;
     host.emitSessionsChange("github");
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // Account B must re-fetch both image and text content with token-b
-    const previewPanel = host.webviewPanels.find((panel) => panel.viewType === "githubControlCenter.prImagePreview");
-    previewPanel?.dispose();
+    // Re-opening the exact same image revision creates a fresh panel and fetches under token-b (no stale panel reuse!)
     await runCommand("openFileDiff", {
       pr: shaPr,
       file: { path: "docs/secret.png", changeType: "ADDED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
@@ -687,10 +709,46 @@ describe("localized extension actions", () => {
     });
     await vi.waitFor(() => expect(github.fetchFileBytes).toHaveBeenCalledTimes(2));
     expect(github.fetchFileBytes).toHaveBeenLastCalledWith("token-b", shaPr.repo, "docs/secret.png", headSha);
+    expect(host.webviewPanels.filter((panel) => panel.viewType === "githubControlCenter.prImagePreview")).toHaveLength(previewPanelCountBeforeSwitch + 1);
 
     await expect(provider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).resolves.toBe("account B secret");
     expect(github.fetchFileContent).toHaveBeenCalledTimes(2);
     expect(github.fetchFileContent).toHaveBeenLastCalledWith("token-b", shaPr.repo, "src/secret.ts", headSha);
+  });
+
+  it("discards in-flight old-account poll responses after a GitHub session switch and refreshes the new account", async () => {
+    const prA: IPullRequest = { ...pr, id: "PR_A", title: "Account A private PR" };
+    const prB: IPullRequest = { ...pr, id: "PR_B", title: "Account B PR" };
+    let resolvePollA!: (snapshot: { toReview: IPullRequest[]; mine: IPullRequest[]; reviewed: IPullRequest[] }) => void;
+
+    vi.mocked(github.getSession).mockResolvedValue({ id: "acct-a", accessToken: "token-a" } as vscode.AuthenticationSession);
+    vi.mocked(github.fetchPullRequests)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolvePollA = resolve; }))
+      .mockResolvedValueOnce({ toReview: [prB], mine: [], reviewed: [] });
+
+    // Start poll under Account A (hangs inside fetchPullRequests)
+    void runCommand("refresh");
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledWith("token-a"));
+
+    // Switch to Account B while Account A's poll is still in flight
+    vi.mocked(github.getSession).mockResolvedValue({ id: "acct-b", accessToken: "token-b" } as vscode.AuthenticationSession);
+    host.emitSessionsChange("github");
+
+    // Account A's stale response arrives late -> must NOT write Account A's PR to sidebar or toast!
+    host.window.showInformationMessage.mockClear();
+    resolvePollA({ toReview: [prA], mine: [], reviewed: [] });
+
+    // Queued Account B forced refresh runs next and populates only Account B's PR
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledWith("token-b"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const toReviewProvider = host.webviewViewProviders.get("githubControlCenter.toReview") as unknown as {
+      findPr(id: string): IPullRequest | undefined;
+    };
+    expect(toReviewProvider.findPr("PR_A")).toBeUndefined();
+    expect(toReviewProvider.findPr("PR_B")).toEqual(prB);
+    expect(host.window.showInformationMessage).not.toHaveBeenCalledWith(expect.stringContaining("Account A private PR"), expect.anything(), expect.anything());
   });
 });
 

@@ -208,25 +208,28 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     if (serialized === latestJson) {
       return;
     }
+    const targetView = view;
     const seq = ++this.postStateSeq;
     this.inFlightSnapshotJson = serialized;
-    void Promise.resolve(view.webview.postMessage({ command: "state", snapshot })).then(
+    void Promise.resolve(targetView.webview.postMessage({ command: "state", snapshot })).then(
       (delivered) => {
-        if (this.view !== view || this.postStateSeq !== seq) {
+        if (this.view !== targetView || this.postStateSeq !== seq) {
           return;
         }
         this.inFlightSnapshotJson = undefined;
         if (delivered === false) {
+          this.lastPostedSnapshotJson = undefined;
           this.pendingStateSync = true;
           return;
         }
         this.lastPostedSnapshotJson = serialized;
       },
       () => {
-        if (this.view !== view || this.postStateSeq !== seq) {
+        if (this.view !== targetView || this.postStateSeq !== seq) {
           return;
         }
         this.inFlightSnapshotJson = undefined;
+        this.lastPostedSnapshotJson = undefined;
         this.pendingStateSync = true;
       },
     );

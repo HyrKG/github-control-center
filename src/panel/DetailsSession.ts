@@ -91,6 +91,7 @@ export class DetailsSession {
   private lastRenderedBrief: string | undefined;
   private detailsRequestSequence = 0;
   private detailsRefreshSequence = 0;
+  private coldOpenInFlight = false;
   private disposed = false;
   private mutationInFlight = false;
   // a confirmation modal is open: the webview has already frozen its buttons but mutationInFlight
@@ -119,7 +120,7 @@ export class DetailsSession {
     this.ensureAiDetected(); // first panel open triggers the one-time CLI probe
     this.composerHasText = false; // every user-initiated render starts from an empty composer
     const requestId = ++this.detailsRequestSequence;
-    const refreshId = ++this.detailsRefreshSequence;
+    this.detailsRefreshSequence += 1;
     const session = await this.deps.getSession(false);
     if (this.disposed || requestId !== this.detailsRequestSequence) {
       return;
@@ -138,18 +139,23 @@ export class DetailsSession {
     this.activeSessionKey = nextSessionKey;
 
     const cached = this.getCachedDetails(pr.id);
+    const isColdOpen = !cached;
     if (cached) {
+      this.coldOpenInFlight = false;
       this.presentDetails(pr, cached, "reveal");
     } else {
+      this.coldOpenInFlight = true;
+      this.currentDetails = undefined;
       this.deps.panel.showLoading(formatPrTabTitle(pr));
     }
+    const refreshId = ++this.detailsRefreshSequence;
     try {
       const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
       if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       this.cacheDetails(pr.id, details);
-      if (!cached) {
+      if (isColdOpen) {
         this.presentDetails(pr, details, "reveal");
         return;
       }
@@ -166,6 +172,10 @@ export class DetailsSession {
         return;
       }
       this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.loadFailed(toErrorMessage(error)));
+    } finally {
+      if (isColdOpen && requestId === this.detailsRequestSequence) {
+        this.coldOpenInFlight = false;
+      }
     }
   }
 
@@ -177,21 +187,18 @@ export class DetailsSession {
       return;
     }
     const pr = this.currentDetailsPr;
-    if (!pr || !this.canSilentlyUpdatePanel()) {
+    if (!pr || this.coldOpenInFlight || this.currentDetails?.prId !== pr.id || !this.canSilentlyUpdatePanel()) {
       return;
     }
     const requestId = this.detailsRequestSequence;
     const refreshId = ++this.detailsRefreshSequence;
     try {
       const session = await this.deps.getSession(false);
-      if (this.disposed) {
+      if (this.disposed || requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       if (!session) {
         this.clearDetailsCache();
-        return;
-      }
-      if (requestId !== this.detailsRequestSequence || refreshId !== this.detailsRefreshSequence) {
         return;
       }
       const nextSessionKey = toSessionKey(session);
@@ -305,6 +312,7 @@ export class DetailsSession {
   }
 
   clearDetailsCache(): void {
+    this.coldOpenInFlight = false;
     this.detailsRequestSequence += 1;
     this.detailsRefreshSequence += 1;
     this.detailsCache.clear();
@@ -313,6 +321,7 @@ export class DetailsSession {
 
   dispose(): void {
     this.disposed = true;
+    this.coldOpenInFlight = false;
     this.detailsRequestSequence += 1;
     this.detailsRefreshSequence += 1;
     this.aiDetectSequence += 1;
@@ -469,7 +478,6 @@ export class DetailsSession {
     }
     if (!session) {
       this.clearDetailsCache();
-      this.currentDetails = undefined;
       this.composerHasText = false; // this render drops the composer too
       this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToAct);
       return;

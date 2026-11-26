@@ -386,6 +386,69 @@ describe("DetailsSession", () => {
       expect(deps.panel.updateDetails).not.toHaveBeenCalled();
     });
 
+    it("does not allow refreshOpenDetails to preempt an in-flight cold open and leave it stuck on Loading", async () => {
+      const pr = buildPr({ id: "COLD_1" });
+      const coldDetails = buildDetails({ title: "Cold loaded" });
+      let resolveCold!: (details: IPrDetails) => void;
+      const deps = buildDeps();
+      deps.fetchPrDetails = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise<IPrDetails>((resolve) => { resolveCold = resolve; }))
+        .mockRejectedValueOnce(new Error("poll network blip"));
+      const session = new DetailsSession(deps);
+
+      const opening = session.openPrDetails(pr);
+      await flush();
+      expect(deps.panel.showLoading).toHaveBeenCalledTimes(1);
+
+      // Periodic poll triggers refreshOpenDetails while cold open is in flight -> must be skipped
+      await session.refreshOpenDetails();
+      expect(deps.fetchPrDetails).toHaveBeenCalledTimes(1);
+
+      resolveCold(coldDetails);
+      await opening;
+      expect(deps.panel.showDetails).toHaveBeenCalledExactlyOnceWith(coldDetails, undefined);
+    });
+
+    it("ignores a stale signed-out refreshOpenDetails callback so it cannot clear a newer signed-in session cache", async () => {
+      const prA = buildPr({ id: "A" });
+      const prB = buildPr({ id: "B" });
+      const detailsA = buildDetails({ title: "A" });
+      const detailsB = buildDetails({ title: "B" });
+      let resolveStaleRefreshSession!: (session: { accessToken: string } | undefined) => void;
+      const deps = buildDeps();
+      deps.getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "s1", accessToken: "t1" }) // openPrDetails(prA)
+        .mockImplementationOnce(() => new Promise<{ accessToken: string } | undefined>((resolve) => {
+          resolveStaleRefreshSession = resolve;
+        })) // refreshOpenDetails() hangs on getSession
+        .mockResolvedValue({ id: "s2", accessToken: "t2" }); // openPrDetails(prB) + reopen prB
+      deps.fetchPrDetails = vi
+        .fn()
+        .mockResolvedValueOnce(detailsA)
+        .mockResolvedValueOnce(detailsB)
+        .mockResolvedValueOnce(detailsB);
+      const session = new DetailsSession(deps);
+
+      await session.openPrDetails(prA);
+      const staleRefresh = session.refreshOpenDetails();
+      await flush();
+
+      // Newer signed-in openPrDetails(prB) completes and caches prB
+      await session.openPrDetails(prB);
+      // Now the stale refreshOpenDetails resolves getSession as undefined -> must be dropped by sequence check
+      resolveStaleRefreshSession(undefined);
+      await staleRefresh;
+
+      // prB must still be cached (skips showLoading)
+      deps.panel.showLoading.mockClear();
+      deps.panel.showDetails.mockClear();
+      await session.openPrDetails(prB);
+      expect(deps.panel.showLoading).not.toHaveBeenCalled();
+      expect(deps.panel.showDetails).toHaveBeenCalledExactlyOnceWith(detailsB, undefined);
+    });
+
     it("updates cache on refreshOpenDetails and evicts least-recently-used PRs past 30 entries", async () => {
       const deps = buildDeps();
       const session = new DetailsSession(deps);

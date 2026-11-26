@@ -86,16 +86,27 @@ export function activate(context: vscode.ExtensionContext): void {
     sizeOf: (file) => file.bytes.byteLength,
   });
   let activeSessionKey: string | undefined;
+  let sessionEpoch = 0;
 
   function toSessionKey(session: { accessToken: string; id?: string; account?: { id?: string } }): string {
     return `${session.id ?? session.account?.id ?? ""}\0${session.accessToken}`;
   }
 
+  function clearSidebarViews(): void {
+    toReviewProvider.clear();
+    reviewedProvider.clear();
+    mineProvider.clear();
+    toReviewProvider.setBadge(undefined);
+    knownRepos = new Set();
+  }
+
   function clearSessionCaches(): void {
+    sessionEpoch += 1;
     imageBytesCache.clear();
     contentProvider.clear();
     fileListCache.clear();
     patchCache.clear();
+    imagePreview.clear();
     detailsSession.clearDetailsCache();
   }
 
@@ -103,11 +114,15 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!session) {
       activeSessionKey = undefined;
       clearSessionCaches();
+      clearSidebarViews();
+      lastSuccessfulRefreshAt = undefined;
       return;
     }
     const nextKey = toSessionKey(session);
     if (activeSessionKey !== undefined && activeSessionKey !== nextKey) {
       clearSessionCaches();
+      clearSidebarViews();
+      lastSuccessfulRefreshAt = undefined;
     }
     activeSessionKey = nextKey;
   }
@@ -320,7 +335,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   async function openFileDiff(node: IFileNode, forceText = false): Promise<void> {
-    const { pr, file } = node;
+    const { pr } = node;
+    let file = node.file;
     try {
       reviewController.registerPr(pr);
       // fire-and-forget: threads appear shortly after the diff opens; failures land in the output channel
@@ -328,8 +344,19 @@ export function activate(context: vscode.ExtensionContext): void {
         output.appendLine(`[${new Date().toISOString()}] Review threads load failed: ${toDiagnosticMessage(error)}`);
       });
       let previousPath: string | undefined;
-      if (file.changeType === "RENAMED" || file.changeType === "COPIED" || node.stale) {
-        // renames/copies (and stale file entries mid-refresh) need previous_filename for the LEFT path before building URIs
+      if (node.stale) {
+        // stale file entries mid-refresh resolve latest head file metadata alongside patches
+        const [patches, freshFiles] = await Promise.all([
+          ensurePatches(pr),
+          loadPrFiles(pr).catch((error: unknown) => {
+            output.appendLine(`[${new Date().toISOString()}] PR files load failed: ${toDiagnosticMessage(error)}`);
+            return undefined;
+          }),
+        ]);
+        file = freshFiles?.find((candidate) => candidate.path === file.path) ?? file;
+        previousPath = patches.get(file.path)?.previousPath;
+      } else if (file.changeType === "RENAMED" || file.changeType === "COPIED") {
+        // renames/copies need previous_filename for the LEFT path before building the URIs
         const patches = await ensurePatches(pr);
         previousPath = patches.get(file.path)?.previousPath;
       } else {
@@ -681,22 +708,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function runRefreshPass(): Promise<void> {
     let hasSession = false;
+    let refreshEpoch = sessionEpoch;
     try {
       const session = await getSession(false);
       syncAuthSession(session);
+      refreshEpoch = sessionEpoch;
       await vscode.commands.executeCommand("setContext", "githubControlCenter.signedIn", Boolean(session));
-      if (!session) {
-        toReviewProvider.clear();
-        reviewedProvider.clear();
-        mineProvider.clear();
-        toReviewProvider.setBadge(undefined);
-        lastSuccessfulRefreshAt = undefined;
+      if (!session || refreshEpoch !== sessionEpoch) {
         return;
       }
       hasSession = true;
       // the overlay rewrites the raw snapshot, so panel re-pointing, filters, providers, badge
       // and trackers all see the same optimistic world until GitHub's search index catches up
       const snapshot = approvalOverlay.apply(await fetchPullRequests(session.accessToken));
+      if (refreshEpoch !== sessionEpoch) {
+        return;
+      }
       const allPrs = [...snapshot.toReview, ...snapshot.mine, ...snapshot.reviewed];
       knownRepos = new Set(allPrs.map((pr) => pr.repo));
       // re-points the open-panel PR at the fresh snapshot entry (raw, pre-filter) before silently
@@ -732,12 +759,15 @@ export function activate(context: vscode.ExtensionContext): void {
       pollScheduler.recordSuccess();
       lastSuccessfulRefreshAt = Date.now();
     } catch (error) {
+      if (refreshEpoch !== sessionEpoch) {
+        return;
+      }
       // poll failures stay silent: keep the last good data, no error toast every 2.5 minutes
       output.appendLine(`[${new Date().toISOString()}] Poll failed: ${toDiagnosticMessage(error)}`);
       pollScheduler.recordFailure(); // next cycle backs off (e.g. GitHub secondary rate limit)
     }
     // independent of the poll's own success/failure: refreshOpenDetails runs its own fetch
-    if (hasSession) {
+    if (hasSession && refreshEpoch === sessionEpoch) {
       void detailsSession.refreshOpenDetails();
     }
   }
@@ -914,6 +944,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.provider.id === "github") {
         activeSessionKey = undefined;
         clearSessionCaches();
+        clearSidebarViews();
         lastSuccessfulRefreshAt = undefined;
         void refresh({ force: true });
       }

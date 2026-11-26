@@ -284,9 +284,9 @@ export function getSession(createIfNone: boolean): Thenable<vscode.Authenticatio
 const REQUEST_TIMEOUT_MS = 30_000;
 
 async function postGraphQl<TData>(token: string, query: string, variables?: Record<string, unknown>): Promise<TData> {
-  let response: Response;
+  let payload: IGraphQlPayload<TData>;
   try {
-    response = await fetch(GRAPHQL_ENDPOINT, {
+    const response = await fetch(GRAPHQL_ENDPOINT, {
       method: "POST",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: {
@@ -295,6 +295,14 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
       },
       body: JSON.stringify({ query, variables }),
     });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new LocalizedError(
+        `GitHub GraphQL request failed with status ${response.status}`,
+        vscode.l10n.t("GitHub GraphQL request failed with status {0}", response.status),
+      );
+    }
+    payload = (await response.json()) as IGraphQlPayload<TData>;
   } catch (error) {
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
       throw new LocalizedError(
@@ -304,15 +312,7 @@ async function postGraphQl<TData>(token: string, query: string, variables?: Reco
     }
     throw error;
   }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    throw new LocalizedError(
-      `GitHub GraphQL request failed with status ${response.status}`,
-      vscode.l10n.t("GitHub GraphQL request failed with status {0}", response.status),
-    );
-  }
 
-  const payload = (await response.json()) as IGraphQlPayload<TData>;
   if (payload.errors?.length) {
     throw new Error(payload.errors[0].message);
   }

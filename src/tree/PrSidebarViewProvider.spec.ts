@@ -448,6 +448,18 @@ describe("PrSidebarViewProvider", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(view.webview.postMessage).toHaveBeenCalledTimes(6);
     expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Gamma");
+
+    // Failed latest postMessage clears lastPostedSnapshotJson so reverting to an earlier state still re-posts
+    view.webview.postMessage.mockResolvedValueOnce(false);
+    provider.setPrs([buildPr({ id: "PR_1", title: "Delta" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(7);
+
+    // Reverting to "Gamma" (previously delivered before "Delta" failed) must NOT be suppressed
+    provider.setPrs([buildPr({ id: "PR_1", title: "Gamma" })]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(8);
+    expect(lastPostedSnapshot(view).groups[0].prs[0].title).toBe("Gamma");
   });
 
   it("marks file nodes as stale while a silent headRefOid refresh is still in flight", async () => {
