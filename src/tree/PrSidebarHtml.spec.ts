@@ -25,7 +25,7 @@ const DEFAULT_STRINGS: ISidebarClientStrings = {
   expandPr: "Toggle changed files",
   expandRepo: "Toggle repository",
   expandFolder: "Toggle folder",
-  searchPlaceholder: "Filter by #number or title…",
+  searchPlaceholder: "Filter by PR title…",
   clearSearch: "Clear search",
   noMatchingPrs: "No matching pull requests",
   favoriteRepo: "Favorite repository",
@@ -781,7 +781,7 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.app.querySelectorAll(".file-dir")[0].textContent).toBe("src/<img src=x onerror=alert(3)>");
   });
 
-  it("filters PRs strictly by #number and title without recreating #search-input, auto-expands collapsed repos, and restores state on clear", () => {
+  it("filters PRs strictly by PR title (ignoring GitHub PR #number, repo, and author) without recreating #search-input, auto-expands collapsed repos, and restores state on clear", () => {
     const multiRepoSnapshot: ISidebarSnapshot = {
       signedIn: true,
       layout: "tree",
@@ -791,9 +791,9 @@ describe("sidebar webview runtime (node:vm)", () => {
           favorite: true,
           prs: [
             {
-              id: "PR_4911",
-              number: 4911,
-              title: "feat(billing): support batch invoices (#4911)",
+              id: "PR_9",
+              number: 9,
+              title: "feat(combat): 打击反馈 (#4911)",
               repo: "org/alpha-service",
               author: "alice",
               isDraft: false,
@@ -803,13 +803,13 @@ describe("sidebar webview runtime (node:vm)", () => {
               additions: 120,
               deletions: 15,
               meta: "alice · opened today",
-              tooltip: "org/alpha-service\nfeat(billing)",
+              tooltip: "org/alpha-service\nfeat(combat): 打击反馈 (#4911)",
               expanded: false,
               filesState: { status: "idle" },
             },
             {
-              id: "PR_4912",
-              number: 4912,
+              id: "PR_26",
+              number: 26,
               title: "fix(auth): refresh expired token",
               repo: "org/alpha-service",
               author: "bob",
@@ -860,6 +860,8 @@ describe("sidebar webview runtime (node:vm)", () => {
     const initialInput = vm.mockDocument.getElementById("search-input")!;
     const clearBtn = vm.mockDocument.getElementById("search-clear")!;
     expect(initialInput).not.toBeNull();
+    expect(initialInput.getAttribute("placeholder")).toBe("Filter by PR title…");
+    expect(initialInput.getAttribute("aria-label")).toBe("Filter by PR title…");
     expect(clearBtn.classList.contains("is-hidden")).toBe(true);
 
     // Ctrl+F focuses and selects the search input
@@ -868,7 +870,7 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.activeElement).toBe(initialInput);
     expect(initialInput.selected).toBe(true);
 
-    // Typing #4911 matches PR_4911, hides org/beta-web, temporarily auto-expands org/alpha-service, and updates badge count to 1
+    // Typing #4911 matches PR_9 (title contains (#4911)), hides org/beta-web, temporarily auto-expands org/alpha-service, and updates badge count to 1
     initialInput.input("#4911");
     expect(vm.mockDocument.getElementById("search-input")).toBe(initialInput);
     expect(vm.mockDocument.activeElement).toBe(initialInput);
@@ -879,7 +881,7 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(matchedRepos[0].findAll((el) => el.classList.contains("repo-count"))[0].textContent).toBe("1");
     const matchedPrs = vm.mockDocument.treeRoot.querySelectorAll(".pr-row");
     expect(matchedPrs).toHaveLength(1);
-    expect(matchedPrs[0].getAttribute("data-pr-id")).toBe("PR_4911");
+    expect(matchedPrs[0].getAttribute("data-pr-id")).toBe("PR_9");
     expect(vm.setState).toHaveBeenLastCalledWith(expect.objectContaining({ searchQuery: "#4911" }));
 
     // Host state update while typing must NOT recreate #search-input or steal focus
@@ -887,18 +889,16 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.getElementById("search-input")).toBe(initialInput);
     expect(vm.mockDocument.activeElement).toBe(initialInput);
 
-    // Typing repo name or author name must NOT match (strictly #number + title only)
-    initialInput.input("beta-web");
-    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(0);
-    expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
-
-    initialInput.input("alice");
-    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(0);
-    expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+    // Typing GitHub PR #number (#9, #26, #5001), repo name, or author name must NOT match (strictly pr.title only)
+    for (const nonTitleQuery of ["#9", "#26", "#5001", "beta-web", "alice"]) {
+      initialInput.input(nonTitleQuery);
+      expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row"), nonTitleQuery).toHaveLength(0);
+      expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+    }
 
     // Case-insensitive title substring match works
     initialInput.input("EXPIRED TOKEN");
-    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_4912"]);
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_26"]);
 
     // Escape clears search and restores original collapsedRepos state (org/alpha-service collapsed again)
     const esc = vm.mockDocument.emitKeydown("Escape");
@@ -909,7 +909,7 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_5001"]);
 
     // Clear button also clears search and keeps focus in #search-input
-    initialInput.input("#5001");
+    initialInput.input("polish");
     expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(1);
     clearBtn.click();
     expect(initialInput.value).toBe("");

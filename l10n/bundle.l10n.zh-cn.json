@@ -50,7 +50,7 @@
   "Failed to open the diff: {0}": "打开文件差异失败：{0}",
   "Favorite repository": "收藏仓库",
   "Files changed": "变更文件",
-  "Filter by #number or title…": "按 #编号 或标题筛选…",
+  "Filter by PR title…": "按 PR 标题筛选…",
   "Fit to view (0)": "适应窗口 (0)",
   "GitHub GraphQL request failed with status {0}": "GitHub GraphQL 请求失败，状态码为 {0}",
   "GitHub GraphQL request timed out": "GitHub GraphQL 请求超时",

@@ -63,7 +63,7 @@ export function createSidebarStrings(viewKind: SidebarViewKind): ISidebarStrings
       expandPr: vscode.l10n.t("Toggle changed files"),
       expandRepo: vscode.l10n.t("Toggle repository"),
       expandFolder: vscode.l10n.t("Toggle folder"),
-      searchPlaceholder: vscode.l10n.t("Filter by #number or title…"),
+      searchPlaceholder: vscode.l10n.t("Filter by PR title…"),
       clearSearch: vscode.l10n.t("Clear search"),
       noMatchingPrs: vscode.l10n.t("No matching pull requests"),
       favoriteRepo: vscode.l10n.t("Favorite repository"),

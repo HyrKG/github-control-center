@@ -1464,7 +1464,7 @@ const SIDEBAR_SCRIPT = `
     searchInput.type = "text";
     searchInput.className = "search-input";
     searchInput.setAttribute("id", "search-input");
-    var placeholder = strings.searchPlaceholder || "Filter by #number or title…";
+    var placeholder = strings.searchPlaceholder || "Filter by PR title…";
     searchInput.setAttribute("placeholder", placeholder);
     searchInput.setAttribute("aria-label", placeholder);
     searchInput.setAttribute("autocomplete", "off");
@@ -1546,7 +1546,7 @@ const SIDEBAR_SCRIPT = `
       var rawGroup = snapshot.groups[g];
       var matchedPrs = isSearching
         ? rawGroup.prs.filter(function (pr) {
-            return ("#" + pr.number + " " + pr.title).toLowerCase().indexOf(query) !== -1;
+            return (pr.title || "").toLowerCase().indexOf(query) !== -1;
           })
         : rawGroup.prs;
       if (matchedPrs.length > 0) {
