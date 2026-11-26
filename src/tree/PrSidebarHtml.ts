@@ -161,7 +161,7 @@ html, body {
   padding: 0;
   width: 100%;
   min-height: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
   background: var(--ghcc-bg);
   color: var(--ghcc-fg);
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
@@ -884,6 +884,7 @@ const SIDEBAR_SCRIPT = `
   var treeRoot = document.getElementById("tree-root");
   var searchInput = null;
   var searchClearBtn = null;
+  var isComposing = false;
   var focusedRowId = null;
   var selectedRowId = null;
   var copiedPrTimers = Object.create(null);
@@ -1470,7 +1471,19 @@ const SIDEBAR_SCRIPT = `
     searchInput.setAttribute("autocomplete", "off");
     searchInput.setAttribute("spellcheck", "false");
     searchInput.value = searchQuery;
-    searchInput.addEventListener("input", function () {
+    searchInput.addEventListener("compositionstart", function () {
+      isComposing = true;
+    });
+    searchInput.addEventListener("compositionend", function () {
+      isComposing = false;
+      searchQuery = searchInput.value;
+      persistUiState();
+      render(false);
+    });
+    searchInput.addEventListener("input", function (event) {
+      if (isComposing || (event && event.isComposing)) {
+        return;
+      }
       searchQuery = searchInput.value;
       persistUiState();
       render(false);
@@ -1692,9 +1705,30 @@ const SIDEBAR_SCRIPT = `
     }
   }
 
+  function isInside(container, target) {
+    if (!container || !target) { return false; }
+    if (typeof container.contains === "function") {
+      return container.contains(target);
+    }
+    var cur = target;
+    while (cur) {
+      if (cur === container) { return true; }
+      cur = cur.parentNode;
+    }
+    return false;
+  }
+
   document.addEventListener("keydown", function (event) {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "f" || event.key === "F")) {
-      if (searchInput && searchBar && !searchBar.classList.contains("is-hidden")) {
+    if (isComposing || event.isComposing || event.keyCode === 229) {
+      return;
+    }
+
+    var searchVisible = Boolean(searchBar && !searchBar.classList.contains("is-hidden"));
+    var active = document.activeElement;
+    var inSearchBar = isInside(searchBar, active);
+
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && (event.key === "f" || event.key === "F")) {
+      if (searchInput && searchVisible) {
         event.preventDefault();
         if (typeof searchInput.focus === "function") { searchInput.focus(); }
         if (typeof searchInput.select === "function") { searchInput.select(); }
@@ -1702,26 +1736,32 @@ const SIDEBAR_SCRIPT = `
       return;
     }
 
-    if (event.key === "Escape" && searchQuery.length > 0) {
+    if (event.key === "Escape" && searchVisible && (searchQuery.length > 0 || active === searchInput)) {
       event.preventDefault();
-      clearSearch(document.activeElement === searchInput);
-      return;
-    }
-
-    if (!treeRoot) { return; }
-    var rows = Array.prototype.slice.call(treeRoot.querySelectorAll("[data-row-id]"));
-
-    if (searchInput && document.activeElement === searchInput) {
-      if (event.key === "ArrowDown" && rows.length > 0) {
-        event.preventDefault();
-        setActiveRow(rows[0].getAttribute("data-row-id"), true);
+      if (searchQuery.length > 0) {
+        clearSearch(inSearchBar);
       }
       return;
     }
 
-    if (rows.length === 0) { return; }
+    if (inSearchBar) {
+      if (active === searchInput && event.key === "ArrowDown" && treeRoot) {
+        var firstRows = treeRoot.querySelectorAll("[data-row-id]");
+        if (firstRows.length > 0) {
+          event.preventDefault();
+          setActiveRow(firstRows[0].getAttribute("data-row-id"), true);
+        }
+      }
+      return;
+    }
 
-    var active = document.activeElement;
+    if (!treeRoot) { return; }
+    if (active && active !== document.body && !isInside(treeRoot, active)) {
+      return;
+    }
+
+    var rows = Array.prototype.slice.call(treeRoot.querySelectorAll("[data-row-id]"));
+    if (rows.length === 0) { return; }
     var isSearching = searchQuery.trim().length > 0;
     var currentIndex = rows.indexOf(active);
     if (currentIndex === -1) {

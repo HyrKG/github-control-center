@@ -402,22 +402,37 @@ export function activate(context: vscode.ExtensionContext): void {
     return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
   }
 
-  async function toggleFavoriteRepo(repo: string): Promise<void> {
+  let favoriteToggleChain: Promise<void> = Promise.resolve();
+
+  function toggleFavoriteRepo(repo: string): Promise<void> {
     const trimmed = repo.trim();
     if (!trimmed) {
-      return;
+      return Promise.resolve();
     }
-    const config = ghccConfig();
-    const current = getFavoriteRepos();
-    const normalized = trimmed.toLowerCase();
-    const exists = current.some((entry) => entry.trim().toLowerCase() === normalized);
-    const next = exists
-      ? current.filter((entry) => entry.trim().toLowerCase() !== normalized)
-      : [...current, trimmed];
-    await config.update("favoriteRepos", next, vscode.ConfigurationTarget.Global);
-    for (const provider of sidebarProviders) {
-      provider.refresh();
-    }
+    const run = favoriteToggleChain.then(async () => {
+      const config = ghccConfig();
+      const inspected = typeof config.inspect === "function" ? config.inspect<string[]>("favoriteRepos") : undefined;
+      const hasWorkspaceOverride =
+        inspected?.workspaceFolderValue !== undefined || inspected?.workspaceValue !== undefined;
+      const target = hasWorkspaceOverride
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+      const raw = hasWorkspaceOverride
+        ? (inspected.workspaceFolderValue ?? inspected.workspaceValue)
+        : (inspected?.globalValue ?? config.get<unknown>("favoriteRepos", []));
+      const current = Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
+      const normalized = trimmed.toLowerCase();
+      const exists = current.some((entry) => entry.trim().toLowerCase() === normalized);
+      const next = exists
+        ? current.filter((entry) => entry.trim().toLowerCase() !== normalized)
+        : [...current, trimmed];
+      await config.update("favoriteRepos", next, target);
+      for (const provider of sidebarProviders) {
+        provider.refresh();
+      }
+    });
+    favoriteToggleChain = run.catch(() => {});
+    return run;
   }
 
   function publishFilesLayoutContext(): void {

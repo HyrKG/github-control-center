@@ -45,9 +45,20 @@ const host = vi.hoisted(() => {
   const webviewPanels: IMockWebviewPanel[] = [];
   const globalStateStore = new Map<string, unknown>();
   const configStore = new Map<string, unknown>();
-  const configUpdate = vi.fn(async (key: string, value: unknown) => {
-    configStore.set(key, value);
+  const workspaceConfigStore = new Map<string, unknown>();
+  const configUpdate = vi.fn(async (key: string, value: unknown, target?: number) => {
+    if (target === 2) {
+      workspaceConfigStore.set(key, value);
+    } else {
+      configStore.set(key, value);
+    }
   });
+  const configInspect = vi.fn((key: string) => ({
+    key,
+    globalValue: configStore.has(key) ? configStore.get(key) : undefined,
+    workspaceValue: workspaceConfigStore.has(key) ? workspaceConfigStore.get(key) : undefined,
+    workspaceFolderValue: undefined,
+  }));
   const clipboardWriteText = vi.fn();
   let onWindowStateChange: ((state: { focused: boolean }) => void) | undefined;
   let onSessionsChange: ((event: { provider: { id: string } }) => void) | undefined;
@@ -62,7 +73,9 @@ const host = vi.hoisted(() => {
     webviewPanels,
     globalStateStore,
     configStore,
+    workspaceConfigStore,
     configUpdate,
+    configInspect,
     clipboardWriteText,
     external: vi.fn(),
     createCommentThread: vi.fn(() => ({ ...subscription })),
@@ -95,7 +108,13 @@ const host = vi.hoisted(() => {
     },
     workspace: {
       getConfiguration: () => ({
-        get: <T>(key: string, fallback: T) => (configStore.has(key) ? (configStore.get(key) as T) : fallback),
+        get: <T>(key: string, fallback: T) =>
+          workspaceConfigStore.has(key)
+            ? (workspaceConfigStore.get(key) as T)
+            : configStore.has(key)
+              ? (configStore.get(key) as T)
+              : fallback,
+        inspect: configInspect,
         update: configUpdate,
       }),
       onDidChangeConfiguration: (cb: (event: vscode.ConfigurationChangeEvent) => void) => {
@@ -179,7 +198,7 @@ vi.mock("vscode", async (importOriginal) => {
     },
     ViewColumn: { Active: -1 },
     StatusBarAlignment: { Left: 1 },
-    ConfigurationTarget: { Global: 1 },
+    ConfigurationTarget: { Global: 1, Workspace: 2 },
   };
 });
 
@@ -244,6 +263,7 @@ describe("localized extension actions", () => {
     host.window.state.focused = false;
     host.globalStateStore.clear();
     host.configStore.clear();
+    host.workspaceConfigStore.clear();
     setTestLocale("zh-cn", chineseBundle());
     vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
@@ -872,6 +892,67 @@ describe("localized extension actions", () => {
     host.emitConfigChange(["githubControlCenter.mutedRepos"]);
     await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(1));
   });
+
+  it("preserves workspace favoriteRepos override without clobbering global favorites and serializes concurrent toggles", async () => {
+    const prAlpha: IPullRequest = { ...pr, id: "PR_ALPHA", repo: "acme/alpha", number: 101 };
+    const prZeta: IPullRequest = { ...pr, id: "PR_ZETA", repo: "acme/zeta", number: 202 };
+    vi.mocked(github.fetchPullRequests).mockResolvedValueOnce({
+      toReview: [prAlpha, prZeta],
+      reviewed: [],
+      mine: [],
+    });
+    await runCommand("refresh");
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Workspace override exists alongside global favorites -> toggle writes Workspace (target=2) only
+    host.configStore.set("favoriteRepos", ["acme/global-only"]);
+    host.workspaceConfigStore.set("favoriteRepos", ["acme/ws-initial"]);
+    host.configUpdate.mockClear();
+
+    await runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/alpha" });
+    expect(host.configUpdate).toHaveBeenCalledWith("favoriteRepos", ["acme/ws-initial", "acme/alpha"], 2);
+    expect(host.configStore.get("favoriteRepos")).toEqual(["acme/global-only"]);
+    expect(host.workspaceConfigStore.get("favoriteRepos")).toEqual(["acme/ws-initial", "acme/alpha"]);
+
+    // Clear workspace override -> subsequent rapid concurrent toggles write Global (target=1) sequentially without data loss
+    host.workspaceConfigStore.clear();
+    host.configStore.set("favoriteRepos", []);
+    host.configUpdate.mockClear();
+
+    let releaseFirstUpdate!: () => void;
+    host.configUpdate.mockImplementationOnce(
+      (key: string, value: unknown, target?: number) =>
+        new Promise<void>((resolve) => {
+          releaseFirstUpdate = () => {
+            if (target === 2) {
+              host.workspaceConfigStore.set(key, value);
+            } else {
+              host.configStore.set(key, value);
+            }
+            resolve();
+          };
+        }),
+    );
+
+    const first = runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/alpha" });
+    const second = runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/zeta" });
+
+    // Second update must wait for first update to commit before reading config
+    await vi.waitFor(() => expect(host.configUpdate).toHaveBeenCalledTimes(1));
+    releaseFirstUpdate();
+    await Promise.all([first, second]);
+
+    expect(host.configUpdate).toHaveBeenNthCalledWith(1, "favoriteRepos", ["acme/alpha"], 1);
+    expect(host.configUpdate).toHaveBeenNthCalledWith(2, "favoriteRepos", ["acme/alpha", "acme/zeta"], 1);
+    expect(host.configStore.get("favoriteRepos")).toEqual(["acme/alpha", "acme/zeta"]);
+
+    // A rejected write must not wedge subsequent toggles
+    host.configUpdate.mockRejectedValueOnce(new Error("settings write failed"));
+    await expect(runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/zeta" })).rejects.toThrow("settings write failed");
+    await runCommand("toggleFavoriteRepo", { webviewSection: "repo", repo: "acme/zeta" });
+    expect(host.configStore.get("favoriteRepos")).toEqual(["acme/alpha"]);
+  });
 });
 
 describe("window focus cooldown", () => {
@@ -883,6 +964,7 @@ describe("window focus cooldown", () => {
     host.window.state.focused = true;
     host.globalStateStore.clear();
     host.configStore.clear();
+    host.workspaceConfigStore.clear();
     vi.mocked(github.getSession).mockResolvedValue({ accessToken: "token" } as vscode.AuthenticationSession);
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
     vi.mocked(github.fetchFileContent).mockResolvedValue("file content");

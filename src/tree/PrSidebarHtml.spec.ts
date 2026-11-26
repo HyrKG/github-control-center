@@ -171,9 +171,40 @@ class MockElement {
     this.dispatchEvent({ type: "click", stopped: false, defaultPrevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.defaultPrevented = true; } });
   }
 
-  input(nextValue: string): void {
+  input(nextValue: string, options: { isComposing?: boolean } = {}): void {
     this.value = nextValue;
-    this.dispatchEvent({ type: "input", stopped: false, defaultPrevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.defaultPrevented = true; } });
+    this.dispatchEvent({
+      type: "input",
+      isComposing: Boolean(options.isComposing),
+      stopped: false,
+      defaultPrevented: false,
+      stopPropagation() { this.stopped = true; },
+      preventDefault() { this.defaultPrevented = true; },
+    });
+  }
+
+  emitComposition(type: "compositionstart" | "compositionend", nextValue?: string): void {
+    if (nextValue !== undefined) {
+      this.value = nextValue;
+    }
+    this.dispatchEvent({
+      type,
+      stopped: false,
+      defaultPrevented: false,
+      stopPropagation() { this.stopped = true; },
+      preventDefault() { this.defaultPrevented = true; },
+    });
+  }
+
+  contains(other: MockElement | null): boolean {
+    let cur = other;
+    while (cur) {
+      if (cur === this) {
+        return true;
+      }
+      cur = cur.parentNode;
+    }
+    return false;
   }
 
   dispatchEvent(event: MockEvent): void {
@@ -214,9 +245,12 @@ class MockElement {
 interface MockEvent {
   type: string;
   key?: string;
+  keyCode?: number;
   ctrlKey?: boolean;
   metaKey?: boolean;
+  shiftKey?: boolean;
   altKey?: boolean;
+  isComposing?: boolean;
   stopped: boolean;
   defaultPrevented: boolean;
   stopPropagation: () => void;
@@ -225,6 +259,7 @@ interface MockEvent {
 
 class MockDocument {
   activeElement: MockElement | null = null;
+  readonly body: MockElement;
   readonly app: MockElement;
   readonly searchBar: MockElement;
   readonly treeRoot: MockElement;
@@ -232,6 +267,7 @@ class MockDocument {
   private readonly listeners = new Map<string, Array<(event: MockEvent) => void>>();
 
   constructor(bootJson: string) {
+    this.body = new MockElement("body", this);
     this.app = new MockElement("div", this);
     this.app.setAttribute("id", "app");
     this.searchBar = new MockElement("div", this);
@@ -241,6 +277,7 @@ class MockDocument {
     this.treeRoot.setAttribute("id", "tree-root");
     this.app.appendChild(this.searchBar);
     this.app.appendChild(this.treeRoot);
+    this.body.appendChild(this.app);
     this.boot = new MockElement("script", this);
     this.boot.setAttribute("id", "ghcc-boot");
     this.boot.textContent = bootJson;
@@ -276,13 +313,19 @@ class MockDocument {
     this.listeners.set(type, list);
   }
 
-  emitKeydown(key: string, modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean } = {}): MockEvent {
+  emitKeydown(
+    key: string,
+    modifiers: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; isComposing?: boolean; keyCode?: number } = {},
+  ): MockEvent {
     const event: MockEvent = {
       type: "keydown",
       key,
+      keyCode: modifiers.keyCode,
       ctrlKey: Boolean(modifiers.ctrlKey),
       metaKey: Boolean(modifiers.metaKey),
+      shiftKey: Boolean(modifiers.shiftKey),
       altKey: Boolean(modifiers.altKey),
+      isComposing: Boolean(modifiers.isComposing),
       stopped: false,
       defaultPrevented: false,
       stopPropagation() { this.stopped = true; },
@@ -466,6 +509,9 @@ describe("renderSidebarHtml security & CSS priority", () => {
     expect(html).toMatch(/\.pr-title-wrap\s*\{[^}]*flex:\s*1 1 0;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
     // Flat-mode directory shrinks before the filename
     expect(html).toMatch(/\.file-dir\s*\{[^}]*flex:\s*0 1000 auto;[^}]*min-width:\s*0;/s);
+    // Uses overflow-x: clip on html, body so position: sticky #search-bar sticks to viewport
+    expect(html).toMatch(/html,\s*body\s*\{[^}]*overflow-x:\s*clip;/s);
+    expect(html).not.toMatch(/html,\s*body\s*\{[^}]*overflow-x:\s*hidden;/s);
     // Uses VS Code theme CSS variables
     expect(html).toContain("--vscode-sideBar-background");
     expect(html).toContain("--vscode-charts-green");
@@ -916,10 +962,101 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.activeElement).toBe(initialInput);
     expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")).toHaveLength(2);
 
-    // Signed-out state hides #search-bar even if a query was entered
+    // Signed-out state hides #search-bar even if a query was entered, and Escape is NOT intercepted when hidden
     initialInput.input("#4911");
     vm.sendState({ signedIn: false, layout: "tree", groups: [] });
     expect(vm.mockDocument.searchBar.classList.contains("is-hidden")).toBe(true);
+    const hiddenEsc = vm.mockDocument.emitKeydown("Escape");
+    expect(hiddenEsc.defaultPrevented).toBe(false);
+  });
+
+  it("respects IME composition, keeps #search-clear keyboard-activatable, and does not hijack Ctrl/Cmd+Shift+F", () => {
+    const snap: ISidebarSnapshot = {
+      signedIn: true,
+      layout: "tree",
+      groups: [
+        {
+          repo: "org/alpha-service",
+          favorite: false,
+          prs: [
+            {
+              id: "PR_9",
+              number: 9,
+              title: "feat(combat): 打击反馈 (#4911)",
+              repo: "org/alpha-service",
+              author: "alice",
+              isDraft: false,
+              ciState: "SUCCESS",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 10,
+              deletions: 2,
+              meta: "alice · opened today",
+              tooltip: "feat(combat)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+            {
+              id: "PR_26",
+              number: 26,
+              title: "fix(auth): token rotation",
+              repo: "org/alpha-service",
+              author: "bob",
+              isDraft: false,
+              ciState: "NONE",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 5,
+              deletions: 1,
+              meta: "bob · opened today",
+              tooltip: "fix(auth)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const vm = bootSidebarVm(snap);
+    const searchInput = vm.mockDocument.getElementById("search-input")!;
+    const clearBtn = vm.mockDocument.getElementById("search-clear")!;
+    vm.setState.mockClear();
+    vm.postMessage.mockClear();
+
+    // Ctrl+Shift+F must NOT be hijacked (leaves VS Code global search shortcut intact)
+    const ctrlShiftF = vm.mockDocument.emitKeydown("F", { ctrlKey: true, shiftKey: true });
+    expect(ctrlShiftF.defaultPrevented).toBe(false);
+    expect(vm.mockDocument.activeElement).not.toBe(searchInput);
+
+    // During IME composition: input does not filter or persist, and ArrowDown/Escape are not intercepted
+    searchInput.focus();
+    searchInput.emitComposition("compositionstart");
+    searchInput.input("daji", { isComposing: true });
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row")).toHaveLength(2);
+    expect(vm.setState).not.toHaveBeenCalled();
+
+    const imeDown = vm.mockDocument.emitKeydown("ArrowDown", { isComposing: true });
+    expect(imeDown.defaultPrevented).toBe(false);
+    expect(vm.mockDocument.activeElement).toBe(searchInput);
+
+    const imeEsc = vm.mockDocument.emitKeydown("Escape", { keyCode: 229 });
+    expect(imeEsc.defaultPrevented).toBe(false);
+    expect(searchInput.value).toBe("daji");
+
+    // compositionend commits the final text and immediately filters & persists
+    searchInput.emitComposition("compositionend", "打击反馈");
+    expect(vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"))).toEqual(["PR_9"]);
+    expect(vm.setState).toHaveBeenLastCalledWith(expect.objectContaining({ searchQuery: "打击反馈" }));
+
+    // Focusing #search-clear (e.g. via Tab) and pressing Enter or Space must NOT be intercepted by tree keyboard navigation
+    clearBtn.focus();
+    const clearEnter = vm.mockDocument.emitKeydown("Enter");
+    expect(clearEnter.defaultPrevented).toBe(false);
+    const clearSpace = vm.mockDocument.emitKeydown(" ");
+    expect(clearSpace.defaultPrevented).toBe(false);
+    expect(vm.mockDocument.activeElement).toBe(clearBtn);
+    expect(vm.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ command: "openPrDetails" }));
   });
 
   it("renders favorite repo styling, repo context menu metadata, and star toggle button without collapsing the repo", () => {
