@@ -13,6 +13,8 @@ export interface ISidebarClientStrings {
   loadingFiles: string;
   retry: string;
   noChangedFiles: string;
+  copyPrUrl: string;
+  copied: string;
   checkoutBranch: string;
   openOnGitHub: string;
   markAsViewed: string;
@@ -435,7 +437,7 @@ html, body {
 .pr-row:hover .pr-actions,
 .pr-row:focus-within .pr-actions,
 .pr-row.is-focused .pr-actions {
-  max-width: 48px;
+  max-width: 68px;
   opacity: 1;
   pointer-events: auto;
 }
@@ -463,6 +465,11 @@ html, body {
 .pr-action-btn:focus-visible {
   outline: 1px solid var(--ghcc-focus);
   outline-offset: -1px;
+}
+
+.pr-action-btn.is-copied,
+.pr-action-btn.is-copied:hover {
+  color: var(--ghcc-ci-pass);
 }
 
 .pr-action-btn svg {
@@ -698,6 +705,8 @@ const SIDEBAR_SCRIPT = `
   var collapsedFolders = new Set(Array.isArray(persisted.collapsedFolders) ? persisted.collapsedFolders : []);
   var focusedRowId = null;
   var selectedRowId = null;
+  var copiedPrTimers = Object.create(null);
+  var copyButtons = Object.create(null);
   var MAX_DEPTH = ${MAX_INDENT_DEPTH};
   var SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -744,6 +753,10 @@ const SIDEBAR_SCRIPT = `
     ],
     check: [
       { tag: "path", d: "M3.2 8.4l3.1 3.1 6.5-6.8", stroke: "currentColor", sw: "2", fill: "none", cap: "round", join: "round" },
+    ],
+    copy: [
+      { tag: "rect", x: "5.5", y: "5.5", width: "8.5", height: "8.5", rx: "1.4", stroke: "currentColor", sw: "1.3", fill: "none" },
+      { tag: "path", d: "M4.5 10.5H3.5A1.5 1.5 0 0 1 2 9V3A1.5 1.5 0 0 1 3.5 1.5H9A1.5 1.5 0 0 1 10.5 3v1", stroke: "currentColor", sw: "1.3", fill: "none", cap: "round" },
     ],
     branch: [
       { tag: "circle", cx: "5", cy: "3.5", r: "1.6", stroke: "currentColor", sw: "1.3", fill: "none" },
@@ -1086,6 +1099,14 @@ const SIDEBAR_SCRIPT = `
     }
   }
 
+  function applyCopyBtnState(button, isCopied) {
+    var label = isCopied ? (strings.copied || "Copied") : (strings.copyPrUrl || "Copy pull request URL");
+    button.classList.toggle("is-copied", isCopied);
+    button.setAttribute("aria-label", label);
+    button.setAttribute("title", label);
+    button.replaceChildren(createSvg(isCopied ? "check" : "copy"));
+  }
+
   function renderPrRow(pr, repoRowId) {
     var prRowId = "pr:" + pr.id;
     var row = document.createElement("div");
@@ -1162,6 +1183,28 @@ const SIDEBAR_SCRIPT = `
     var actions = document.createElement("div");
     actions.className = "pr-actions";
 
+    var copyUrlBtn = document.createElement("button");
+    copyUrlBtn.type = "button";
+    copyUrlBtn.className = "pr-action-btn";
+    copyUrlBtn.tabIndex = -1;
+    copyButtons[pr.id] = copyUrlBtn;
+    applyCopyBtnState(copyUrlBtn, Boolean(copiedPrTimers[pr.id]));
+    copyUrlBtn.addEventListener("click", function (event) {
+      event.stopPropagation();
+      vscode.postMessage({ command: "copyPrUrl", prId: pr.id });
+      if (copiedPrTimers[pr.id]) {
+        clearTimeout(copiedPrTimers[pr.id]);
+      }
+      applyCopyBtnState(copyUrlBtn, true);
+      copiedPrTimers[pr.id] = setTimeout(function () {
+        delete copiedPrTimers[pr.id];
+        var currentBtn = copyButtons[pr.id];
+        if (currentBtn) {
+          applyCopyBtnState(currentBtn, false);
+        }
+      }, 1500);
+    });
+
     var checkoutBtn = document.createElement("button");
     checkoutBtn.type = "button";
     checkoutBtn.className = "pr-action-btn";
@@ -1186,6 +1229,7 @@ const SIDEBAR_SCRIPT = `
       vscode.postMessage({ command: "openPrExternal", prId: pr.id });
     });
 
+    actions.appendChild(copyUrlBtn);
     actions.appendChild(checkoutBtn);
     actions.appendChild(openExtBtn);
 
@@ -1207,6 +1251,7 @@ const SIDEBAR_SCRIPT = `
   function render(restoreFocus) {
     var app = document.getElementById("app");
     if (!app) { return; }
+    copyButtons = Object.create(null);
 
     var prevActive = document.activeElement;
     var hadFocusInList = Boolean(prevActive && prevActive.getAttribute && prevActive.getAttribute("data-row-id"));

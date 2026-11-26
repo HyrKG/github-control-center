@@ -54,6 +54,8 @@ export function createSidebarStrings(viewKind: SidebarViewKind): ISidebarStrings
       loadingFiles: vscode.l10n.t("Loading files…"),
       retry: vscode.l10n.t("Retry"),
       noChangedFiles: vscode.l10n.t("No changed files"),
+      copyPrUrl: vscode.l10n.t("Copy pull request URL"),
+      copied: vscode.l10n.t("Copied"),
       checkoutBranch: vscode.l10n.t("Checkout branch"),
       openOnGitHub: vscode.l10n.t("Open on GitHub"),
       markAsViewed: vscode.l10n.t("Mark file as viewed"),
