@@ -412,6 +412,7 @@ export function activate(context: vscode.ExtensionContext): void {
     onSignIn: () => void vscode.commands.executeCommand("githubControlCenter.signIn"),
     onOpenPrDetails: (pr) => void detailsSession.openPrDetails(pr),
     onOpenPrExternal: (pr) => openPr(pr.url),
+    onCopyPrUrl: (pr) => void vscode.env.clipboard.writeText(pr.url),
     onCheckoutPr: (pr) => void checkoutBranch(pr.repo, pr.headRefName),
     onOpenFileDiff: (node) => void openFileDiff(node),
     onToggleFileViewed: async (node, viewed) => {

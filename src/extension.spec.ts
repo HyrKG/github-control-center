@@ -440,6 +440,9 @@ describe("localized extension actions", () => {
 
     // Expand PR in webview to load files, then run openTextDiff from webview/context { prId, filePath }
     onMessage?.({ command: "ready" });
+    host.clipboardWriteText.mockClear();
+    onMessage?.({ command: "copyPrUrl", prId: pr.id });
+    expect(host.clipboardWriteText).toHaveBeenCalledExactlyOnceWith(pr.url);
     onMessage?.({ command: "togglePrExpand", prId: pr.id });
     await vi.waitFor(() => expect(github.fetchPrFiles).toHaveBeenCalledWith("token", pr.id));
     await new Promise<void>((resolve) => setImmediate(resolve));

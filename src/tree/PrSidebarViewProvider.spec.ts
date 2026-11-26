@@ -134,6 +134,7 @@ describe("PrSidebarViewProvider", () => {
     onSignIn: Mock<() => void>;
     onOpenPrDetails: Mock<(pr: IPullRequest) => void>;
     onOpenPrExternal: Mock<(pr: IPullRequest) => void>;
+    onCopyPrUrl: Mock<(pr: IPullRequest) => void>;
     onCheckoutPr: Mock<(pr: IPullRequest) => void>;
     onOpenFileDiff: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }) => void>;
     onToggleFileViewed: Mock<(node: { kind: "file"; pr: IPullRequest; file: IPrFile }, viewed: boolean) => Promise<void>>;
@@ -149,6 +150,7 @@ describe("PrSidebarViewProvider", () => {
       onSignIn: vi.fn(),
       onOpenPrDetails: vi.fn(),
       onOpenPrExternal: vi.fn(),
+      onCopyPrUrl: vi.fn(),
       onCheckoutPr: vi.fn(),
       onOpenFileDiff: vi.fn(),
       onToggleFileViewed: vi.fn().mockResolvedValue(undefined),
@@ -349,12 +351,14 @@ describe("PrSidebarViewProvider", () => {
     view.webview.emitMessage({ command: "signIn" });
     view.webview.emitMessage({ command: "openPrDetails", prId: pr.id });
     view.webview.emitMessage({ command: "openPrExternal", prId: pr.id });
+    view.webview.emitMessage({ command: "copyPrUrl", prId: pr.id });
     view.webview.emitMessage({ command: "checkoutPr", prId: pr.id });
     view.webview.emitMessage({ command: "openFileDiff", prId: pr.id, filePath: file.path });
 
     expect(actions.onSignIn).toHaveBeenCalledOnce();
     expect(actions.onOpenPrDetails).toHaveBeenCalledWith(pr);
     expect(actions.onOpenPrExternal).toHaveBeenCalledWith(pr);
+    expect(actions.onCopyPrUrl).toHaveBeenCalledWith(pr);
     expect(actions.onCheckoutPr).toHaveBeenCalledWith(pr);
     expect(actions.onOpenFileDiff).toHaveBeenCalledWith({ kind: "file", pr, file });
 

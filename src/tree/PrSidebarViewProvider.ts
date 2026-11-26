@@ -31,6 +31,7 @@ export interface ISidebarActions {
   onSignIn(): void;
   onOpenPrDetails(pr: IPullRequest): void;
   onOpenPrExternal(pr: IPullRequest): void;
+  onCopyPrUrl(pr: IPullRequest): void;
   onCheckoutPr(pr: IPullRequest): void;
   onOpenFileDiff(node: IFileNode): void;
   onToggleFileViewed(node: IFileNode, viewed: boolean): Promise<void>;
@@ -50,6 +51,7 @@ type SidebarWebviewMessage =
   | { command: "signIn" }
   | { command: "openPrDetails"; prId: string }
   | { command: "openPrExternal"; prId: string }
+  | { command: "copyPrUrl"; prId: string }
   | { command: "checkoutPr"; prId: string }
   | { command: "togglePrExpand"; prId: string }
   | { command: "retryLoadFiles"; prId: string }
@@ -261,6 +263,13 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
         const pr = this.findPr(message.prId);
         if (pr) {
           this.actions.onOpenPrExternal(pr);
+        }
+        return;
+      }
+      case "copyPrUrl": {
+        const pr = this.findPr(message.prId);
+        if (pr) {
+          this.actions.onCopyPrUrl(pr);
         }
         return;
       }

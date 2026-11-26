@@ -16,6 +16,8 @@ const DEFAULT_STRINGS: ISidebarClientStrings = {
   loadingFiles: "Loading files…",
   retry: "Retry",
   noChangedFiles: "No changed files",
+  copyPrUrl: "Copy pull request URL",
+  copied: "Copied",
   checkoutBranch: "Checkout branch",
   openOnGitHub: "Open on GitHub",
   markAsViewed: "Mark file as viewed",
@@ -291,6 +293,8 @@ function bootSidebarVm(initialSnapshot?: ISidebarSnapshot, initialPersistedState
     String,
     Boolean,
     isFinite,
+    setTimeout,
+    clearTimeout,
   });
 
   function sendState(snapshot: ISidebarSnapshot): void {
@@ -470,7 +474,13 @@ describe("sidebar webview runtime (node:vm)", () => {
     const line1 = prRows[0].findAll((el) => el.classList.contains("pr-line-1"))[0];
     const line2 = prRows[0].findAll((el) => el.classList.contains("pr-line-2"))[0];
     expect(line1.findAll((el) => el.classList.contains("pr-actions"))).toHaveLength(0);
-    expect(line2.findAll((el) => el.classList.contains("pr-action-btn"))).toHaveLength(2);
+    const actionBtns = line2.findAll((el) => el.classList.contains("pr-action-btn"));
+    expect(actionBtns).toHaveLength(3);
+    expect(actionBtns.map((btn) => btn.getAttribute("aria-label"))).toEqual([
+      "Copy pull request URL",
+      "Checkout branch",
+      "Open on GitHub",
+    ]);
 
     // Compacted folder row has no diffstat; only PR rows and file rows show diffstats
     const folderRows = vm.mockDocument.app.querySelectorAll(".folder-row");
@@ -517,13 +527,18 @@ describe("sidebar webview runtime (node:vm)", () => {
     vm.postMessage.mockClear();
 
     const prRow = vm.mockDocument.app.querySelectorAll(".pr-row")[0];
-    const [checkoutBtn, openExtBtn] = prRow.findAll((el) => el.classList.contains("pr-action-btn"));
+    const [copyUrlBtn, checkoutBtn, openExtBtn] = prRow.findAll((el) => el.classList.contains("pr-action-btn"));
+    copyUrlBtn.click();
     checkoutBtn.click();
     openExtBtn.click();
     expect(vm.postMessage.mock.calls).toEqual([
+      [{ command: "copyPrUrl", prId: "PR_1" }],
       [{ command: "checkoutPr", prId: "PR_1" }],
       [{ command: "openPrExternal", prId: "PR_1" }],
     ]);
+    expect(copyUrlBtn.classList.contains("is-copied")).toBe(true);
+    expect(copyUrlBtn.getAttribute("aria-label")).toBe("Copied");
+    expect(copyUrlBtn.getAttribute("title")).toBe("Copied");
 
     vm.postMessage.mockClear();
     prRow.findAll((el) => el.classList.contains("pr-chevron-btn"))[0].click();
@@ -568,6 +583,50 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(retryBtn?.textContent).toBe("Retry");
     retryBtn.click();
     expect(vm.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "retryLoadFiles", prId: "PR_1" });
+  });
+
+  it("shows temporary copied state on copyPrUrl click, resets timer on repeat click, and survives re-render", () => {
+    vi.useFakeTimers();
+    try {
+      const vm = bootSidebarVm(sampleExpandedSnapshot("tree"));
+      vm.postMessage.mockClear();
+
+      const getCopyBtn = () => vm.mockDocument.app.querySelectorAll(".pr-row")[0].findAll((el) => el.classList.contains("pr-action-btn"))[0];
+      const copyBtn = getCopyBtn();
+      expect(copyBtn.classList.contains("is-copied")).toBe(false);
+      expect(copyBtn.getAttribute("title")).toBe("Copy pull request URL");
+
+      copyBtn.click();
+      expect(vm.postMessage).toHaveBeenCalledExactlyOnceWith({ command: "copyPrUrl", prId: "PR_1" });
+      expect(copyBtn.classList.contains("is-copied")).toBe(true);
+      expect(copyBtn.getAttribute("aria-label")).toBe("Copied");
+      expect(copyBtn.getAttribute("title")).toBe("Copied");
+
+      // Re-click at 1000ms resets the 1500ms timer
+      vi.advanceTimersByTime(1000);
+      expect(getCopyBtn().classList.contains("is-copied")).toBe(true);
+      getCopyBtn().click();
+
+      // Re-render at +1000ms (2000ms total, 1000ms since second click) keeps copied state on the new button
+      vi.advanceTimersByTime(1000);
+      vm.sendState(sampleExpandedSnapshot("flat"));
+      expect(getCopyBtn().classList.contains("is-copied")).toBe(true);
+      expect(getCopyBtn().getAttribute("title")).toBe("Copied");
+
+      // After remaining 500ms (1500ms from second click), the new button reverts cleanly without errors
+      vi.advanceTimersByTime(500);
+      expect(getCopyBtn().classList.contains("is-copied")).toBe(false);
+      expect(getCopyBtn().getAttribute("aria-label")).toBe("Copy pull request URL");
+      expect(getCopyBtn().getAttribute("title")).toBe("Copy pull request URL");
+
+      // Re-render removing the PR while timer is pending also completes cleanly without errors
+      getCopyBtn().click();
+      expect(getCopyBtn().classList.contains("is-copied")).toBe(true);
+      vm.sendState({ signedIn: true, layout: "tree", groups: [] });
+      expect(() => vi.advanceTimersByTime(1500)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("supports keyboard navigation: arrows, expand/collapse, Enter, and Space viewed toggle", () => {
