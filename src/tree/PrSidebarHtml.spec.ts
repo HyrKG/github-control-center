@@ -1078,8 +1078,15 @@ describe("sidebar webview runtime (node:vm)", () => {
     };
 
     const vm = bootSidebarVm(snap);
-    expect(vm.html).toContain("--ghcc-favorite: var(--vscode-charts-yellow, #e3b341);");
-    expect(vm.html).toMatch(/\.repo-row\.is-favorite\s+\.repo-icon\s*\{\s*color:\s*var\(--ghcc-favorite\);/);
+    expect(vm.html).not.toContain("--ghcc-favorite: var(--vscode-charts-yellow");
+    expect(vm.html).toContain("--ghcc-favorite-fill: #ffd43b;");
+    expect(vm.html).toContain("--ghcc-favorite-stroke: #c98a00;");
+    expect(vm.html).toContain("--ghcc-favorite-page-fill: #fff9db;");
+    expect(vm.html).toMatch(/body\.vscode-light,\s*body\.vscode-high-contrast-light\s*\{[^}]*--ghcc-favorite-fill:\s*#ffd43b;[^}]*--ghcc-favorite-stroke:\s*#c98a00;[^}]*--ghcc-favorite-page-fill:\s*#fff9db;/s);
+    expect(vm.html).toMatch(/body\.vscode-dark,\s*body\.vscode-high-contrast\s*\{[^}]*--ghcc-favorite-fill:\s*#ffd43b;[^}]*--ghcc-favorite-stroke:\s*#eab308;[^}]*--ghcc-favorite-page-fill:\s*var\(--vscode-sideBar-background,\s*#181818\);/s);
+    expect(vm.html).toMatch(/\.repo-row\.is-favorite\s+\.repo-icon\s+svg\s+path:first-child\s*\{[^}]*fill:\s*var\(--ghcc-favorite-fill\);[^}]*stroke:\s*var\(--ghcc-favorite-stroke\);/s);
+    expect(vm.html).toMatch(/\.repo-row\.is-favorite\s+\.repo-icon\s+svg\s+path:last-child\s*\{[^}]*fill:\s*var\(--ghcc-favorite-page-fill\);[^}]*stroke:\s*var\(--ghcc-favorite-stroke\);/s);
+    expect(vm.html).toMatch(/\.repo-action-btn\.is-favorite\s+svg\s+path,\s*\.repo-action-btn\.is-favorite:hover\s+svg\s+path\s*\{[^}]*fill:\s*var\(--ghcc-favorite-fill\);[^}]*stroke:\s*var\(--ghcc-favorite-stroke\);/s);
 
     const repoRows = vm.mockDocument.treeRoot.querySelectorAll(".repo-row");
     expect(repoRows).toHaveLength(2);

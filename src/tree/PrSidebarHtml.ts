@@ -149,7 +149,23 @@ const SIDEBAR_CSS = `
   --ghcc-input-fg: var(--vscode-input-foreground, var(--ghcc-fg));
   --ghcc-input-placeholder: var(--vscode-input-placeholderForeground, var(--ghcc-muted));
   --ghcc-input-border: var(--vscode-input-border, var(--ghcc-border));
-  --ghcc-favorite: var(--vscode-charts-yellow, #e3b341);
+  --ghcc-favorite-fill: #ffd43b;
+  --ghcc-favorite-stroke: #c98a00;
+  --ghcc-favorite-page-fill: #fff9db;
+}
+
+body.vscode-light,
+body.vscode-high-contrast-light {
+  --ghcc-favorite-fill: #ffd43b;
+  --ghcc-favorite-stroke: #c98a00;
+  --ghcc-favorite-page-fill: #fff9db;
+}
+
+body.vscode-dark,
+body.vscode-high-contrast {
+  --ghcc-favorite-fill: #ffd43b;
+  --ghcc-favorite-stroke: #eab308;
+  --ghcc-favorite-page-fill: var(--vscode-sideBar-background, #181818);
 }
 
 * {
@@ -391,7 +407,17 @@ html, body {
 }
 
 .repo-row.is-favorite .repo-icon {
-  color: var(--ghcc-favorite);
+  color: var(--ghcc-favorite-stroke);
+}
+
+.repo-row.is-favorite .repo-icon svg path:first-child {
+  fill: var(--ghcc-favorite-fill);
+  stroke: var(--ghcc-favorite-stroke);
+}
+
+.repo-row.is-favorite .repo-icon svg path:last-child {
+  fill: var(--ghcc-favorite-page-fill);
+  stroke: var(--ghcc-favorite-stroke);
 }
 
 .repo-name {
@@ -454,7 +480,13 @@ html, body {
 
 .repo-action-btn.is-favorite,
 .repo-action-btn.is-favorite:hover {
-  color: var(--ghcc-favorite);
+  color: var(--ghcc-favorite-stroke);
+}
+
+.repo-action-btn.is-favorite svg path,
+.repo-action-btn.is-favorite:hover svg path {
+  fill: var(--ghcc-favorite-fill);
+  stroke: var(--ghcc-favorite-stroke);
 }
 
 .repo-action-btn:focus-visible {
