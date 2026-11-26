@@ -367,7 +367,7 @@ describe("formatDiffNumber", () => {
 });
 
 describe("buildSidebarFileTree", () => {
-  it("reuses fileTree compaction and sums additions/deletions across nested folders", () => {
+  it("reuses fileTree compaction without adding folder diffstat fields", () => {
     const files: IPrFile[] = [
       { path: "src/a/b/one.ts", changeType: "ADDED", additions: 100, deletions: 0, viewedState: "UNVIEWED" },
       { path: "src/a/b/two.ts", changeType: "DELETED", additions: 0, deletions: 1320, viewedState: "VIEWED" },
@@ -384,15 +384,15 @@ describe("buildSidebarFileTree", () => {
       tooltip: file.path,
     }));
 
-    expect(root.additions).toBe(105);
-    expect(root.deletions).toBe(1322);
+    expect(root).not.toHaveProperty("additions");
+    expect(root).not.toHaveProperty("deletions");
     expect(root.folders).toHaveLength(1);
     expect(root.folders[0]).toMatchObject({
       name: "src/a/b",
       path: "src/a/b",
-      additions: 100,
-      deletions: 1320,
     });
+    expect(root.folders[0]).not.toHaveProperty("additions");
+    expect(root.folders[0]).not.toHaveProperty("deletions");
     expect(root.files.map((file) => file.name)).toEqual(["README.md"]);
   });
 });
@@ -472,16 +472,19 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(line1.findAll((el) => el.classList.contains("pr-actions"))).toHaveLength(0);
     expect(line2.findAll((el) => el.classList.contains("pr-action-btn"))).toHaveLength(2);
 
-    // Compacted folder row with aggregated diffstat
+    // Compacted folder row has no diffstat; only PR rows and file rows show diffstats
     const folderRows = vm.mockDocument.app.querySelectorAll(".folder-row");
     expect(folderRows).toHaveLength(1);
     expect(folderRows[0].findAll((el) => el.classList.contains("folder-name"))[0].textContent).toBe("src/components");
-    expect(folderRows[0].findAll((el) => el.classList.contains("diff-add"))[0].textContent).toBe("+27");
-    expect(folderRows[0].findAll((el) => el.classList.contains("diff-del"))[0].textContent).toBe("-1,320");
+    expect(folderRows[0].findAll((el) => el.classList.contains("diffstat"))).toHaveLength(0);
+    expect(prRows[0].findAll((el) => el.classList.contains("diffstat"))).toHaveLength(1);
 
     // File rows show explicit +0 / -0 and thousand separators
     const fileRows = vm.mockDocument.app.querySelectorAll(".file-row");
     expect(fileRows).toHaveLength(3);
+    for (const fileRow of fileRows) {
+      expect(fileRow.findAll((el) => el.classList.contains("diffstat"))).toHaveLength(1);
+    }
     const diffstats = fileRows.map((row) => [
       row.findAll((el) => el.classList.contains("file-name"))[0].textContent,
       row.findAll((el) => el.classList.contains("diff-add"))[0].textContent,

@@ -36,8 +36,6 @@ export interface ISidebarFileView {
 export interface ISidebarFolderView {
   name: string;
   path: string;
-  additions: number;
-  deletions: number;
   folders: ISidebarFolderView[];
   files: ISidebarFileView[];
 }
@@ -94,19 +92,12 @@ function toFolderView(
   folder: IFileTreeFolder,
   toFileView: (file: IPrFile) => ISidebarFileView,
 ): ISidebarFolderView {
-  const folders = folder.folders.map((child) => toFolderView(child, toFileView));
-  const files = folder.files.map(toFileView);
-  let additions = 0;
-  let deletions = 0;
-  for (const child of folders) {
-    additions += child.additions;
-    deletions += child.deletions;
-  }
-  for (const file of files) {
-    additions += file.additions;
-    deletions += file.deletions;
-  }
-  return { name: folder.name, path: folder.path, additions, deletions, folders, files };
+  return {
+    name: folder.name,
+    path: folder.path,
+    folders: folder.folders.map((child) => toFolderView(child, toFileView)),
+    files: folder.files.map(toFileView),
+  };
 }
 
 const MAX_INDENT_DEPTH = 6;
@@ -520,12 +511,6 @@ html, body {
   padding-left: 0;
 }
 
-.diffstat-folder {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.72;
-}
-
 .diff-add {
   color: var(--ghcc-diff-add);
   white-space: nowrap;
@@ -825,9 +810,9 @@ const SIDEBAR_SCRIPT = `
     return span;
   }
 
-  function makeDiffstat(additions, deletions, isFolder) {
+  function makeDiffstat(additions, deletions) {
     var wrap = document.createElement("span");
-    wrap.className = isFolder ? "diffstat diffstat-folder" : "diffstat";
+    wrap.className = "diffstat";
     var addEl = document.createElement("span");
     addEl.className = "diff-add";
     addEl.textContent = "+" + formatNumber(additions);
@@ -974,7 +959,7 @@ const SIDEBAR_SCRIPT = `
     main.appendChild(labelGroup);
 
     row.appendChild(main);
-    row.appendChild(makeDiffstat(file.additions, file.deletions, false));
+    row.appendChild(makeDiffstat(file.additions, file.deletions));
 
     row.addEventListener("click", function () {
       selectedRowId = rowId;
@@ -1014,7 +999,6 @@ const SIDEBAR_SCRIPT = `
       main.appendChild(nameEl);
 
       row.appendChild(main);
-      row.appendChild(makeDiffstat(folder.additions, folder.deletions, true));
 
       (function (key, id) {
         row.addEventListener("click", function () {
@@ -1163,7 +1147,7 @@ const SIDEBAR_SCRIPT = `
       revEl.textContent = pr.reviewGlyph;
       right.appendChild(revEl);
     }
-    right.appendChild(makeDiffstat(pr.additions, pr.deletions, false));
+    right.appendChild(makeDiffstat(pr.additions, pr.deletions));
 
     line1.appendChild(main);
     line1.appendChild(right);

@@ -252,7 +252,8 @@ describe("PrSidebarViewProvider", () => {
       const state = lastPostedSnapshot(view).groups[0].prs[0].filesState;
       expect(state.status).toBe("loaded");
       if (state.status === "loaded") {
-        expect(state.folders[0]).toMatchObject({ name: "src/sub", additions: 3, deletions: 7 });
+        expect(state.folders[0]).toMatchObject({ name: "src/sub", path: "src/sub" });
+        expect(state.folders[0].files[0]).toMatchObject({ path: "src/sub/a.ts", additions: 3, deletions: 7 });
       }
     });
 
