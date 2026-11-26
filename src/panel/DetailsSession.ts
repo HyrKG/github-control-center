@@ -10,6 +10,7 @@ import type { IBriefState, IPrDetails, IPrFile, IPrFilePatch, IPullRequest, Merg
 
 // GitHub reads lag behind writes: one delayed catch-up refresh after each successful mutation
 const POST_MUTATION_REFRESH_DELAY_MS = 3_000;
+const MAX_CACHED_DETAILS = 30;
 
 /** the details panel's own subset of PrDetailsPanel, structurally satisfied by the real class */
 export interface IDetailsSessionPanel {
@@ -69,6 +70,7 @@ type IDispatchableMessage = Exclude<IPanelMessage, { command: "composerState" | 
  */
 export class DetailsSession {
   private readonly strings = createDetailsSessionStrings();
+  private readonly detailsCache = new Map<string, IPrDetails>();
   private currentDetailsPr: IPullRequest | undefined;
   // paired with the PR it belongs to: currentDetailsPr can move (poll re-point) while a fetch is
   // still in flight, so anything combining details with PR data must check the prId matches
@@ -101,24 +103,45 @@ export class DetailsSession {
     this.ensureAiDetected(); // first panel open triggers the one-time CLI probe
     this.composerHasText = false; // every user-initiated render starts from an empty composer
     const requestId = ++this.detailsRequestSequence;
-    this.deps.panel.showLoading(formatPrTabTitle(pr));
+    const cached = this.getCachedDetails(pr.id);
+    if (cached) {
+      this.presentDetails(pr, cached, "reveal");
+    } else {
+      this.deps.panel.showLoading(formatPrTabTitle(pr));
+    }
     const session = await this.deps.getSession(false);
     if (requestId !== this.detailsRequestSequence) {
       return;
     }
     if (!session) {
+      this.detailsCache.clear();
+      this.currentDetails = undefined;
       this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToLoad);
       return;
     }
     try {
       const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
-      if (requestId === this.detailsRequestSequence) {
+      if (requestId !== this.detailsRequestSequence) {
+        return;
+      }
+      this.cacheDetails(pr.id, details);
+      if (!cached) {
         this.presentDetails(pr, details, "reveal");
+        return;
       }
+      if (!this.canSilentlyUpdatePanel() || this.isSameRender(pr, details)) {
+        return;
+      }
+      this.presentDetails(pr, details, "silent");
     } catch (error) {
-      if (requestId === this.detailsRequestSequence) {
-        this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.loadFailed(toErrorMessage(error)));
+      if (requestId !== this.detailsRequestSequence) {
+        return;
       }
+      if (cached) {
+        this.deps.log(`[${new Date().toISOString()}] Details refresh failed: ${toDiagnosticMessage(error)}`);
+        return;
+      }
+      this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.loadFailed(toErrorMessage(error)));
     }
   }
 
@@ -132,18 +155,21 @@ export class DetailsSession {
     }
     const requestId = this.detailsRequestSequence;
     const session = await this.deps.getSession(false);
-    if (!session || requestId !== this.detailsRequestSequence) {
+    if (!session) {
+      this.detailsCache.clear();
+      return;
+    }
+    if (requestId !== this.detailsRequestSequence) {
       return;
     }
     try {
       const details = await this.deps.fetchPrDetails(session.accessToken, pr.id, pr.headRefName);
-      if (requestId !== this.detailsRequestSequence || !this.canSilentlyUpdatePanel()) {
+      if (requestId !== this.detailsRequestSequence) {
         return;
       }
-      const detailsUnchanged = JSON.stringify(details) === JSON.stringify(this.currentDetails?.details);
-      const briefUnchanged = JSON.stringify(this.currentBriefState(pr)) === this.lastRenderedBrief;
-      if (detailsUnchanged && briefUnchanged) {
-        return; // unchanged snapshot: skip the re-render, a full HTML replace resets the scroll
+      this.cacheDetails(pr.id, details);
+      if (!this.canSilentlyUpdatePanel() || this.isSameRender(pr, details)) {
+        return; // unchanged snapshot or blocked panel: skip the re-render, a full HTML replace resets the scroll
       }
       this.presentDetails(pr, details, "silent");
     } catch (error) {
@@ -233,8 +259,42 @@ export class DetailsSession {
     }
   }
 
+  clearDetailsCache(): void {
+    this.detailsCache.clear();
+  }
+
   dispose(): void {
     clearTimeout(this.postMutationTimer);
+  }
+
+  private getCachedDetails(prId: string): IPrDetails | undefined {
+    const cached = this.detailsCache.get(prId);
+    if (!cached) {
+      return undefined;
+    }
+    this.detailsCache.delete(prId);
+    this.detailsCache.set(prId, cached);
+    return cached;
+  }
+
+  private cacheDetails(prId: string, details: IPrDetails): void {
+    this.detailsCache.delete(prId);
+    this.detailsCache.set(prId, details);
+    while (this.detailsCache.size > MAX_CACHED_DETAILS) {
+      const oldestKey = this.detailsCache.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.detailsCache.delete(oldestKey);
+    }
+  }
+
+  private isSameRender(pr: IPullRequest, details: IPrDetails): boolean {
+    const detailsUnchanged =
+      this.currentDetails?.prId === pr.id &&
+      JSON.stringify(details) === JSON.stringify(this.currentDetails.details);
+    const briefUnchanged = JSON.stringify(this.currentBriefState(pr)) === this.lastRenderedBrief;
+    return detailsUnchanged && briefUnchanged;
   }
 
   // the single exit point for rendering the panel: it keeps details paired with their PR and
@@ -337,6 +397,8 @@ export class DetailsSession {
   private async runPrMutation(pr: IPullRequest, actionLabel: string, successMessage: string, mutate: (token: string) => Promise<void>): Promise<void> {
     const session = await this.deps.getSession(false);
     if (!session) {
+      this.detailsCache.clear();
+      this.currentDetails = undefined;
       this.composerHasText = false; // this render drops the composer too
       this.deps.panel.showMessage(formatPrTabTitle(pr), this.strings.signInToAct);
       return;

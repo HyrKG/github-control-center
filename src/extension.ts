@@ -20,6 +20,7 @@ import {
   submitPrReview,
   unresolveThread,
   updatePrBranch,
+  type IFileBytes,
 } from "./github/github";
 import { ReviewController, type IPatchKey } from "./review/ReviewController";
 import { detectAi, runAiPrompt } from "./brief/ai";
@@ -31,6 +32,7 @@ import { ApprovalOverlay } from "./poll/ApprovalOverlay";
 import { applyFilters, partitionReviewed } from "./poll/filters";
 import { NewPrTracker } from "./poll/NewPrTracker";
 import { AsyncOidCache } from "./core/OidCache";
+import { BoundedAsyncCache } from "./core/BoundedAsyncCache";
 import { PrContentProvider, fromPrUri, toPrUri } from "./review/PrContentProvider";
 import { createImageViewerStrings, viewerLanguage } from "./core/imageViewerStrings";
 import { imageMimeType, PrImagePreview } from "./review/PrImagePreview";
@@ -39,10 +41,13 @@ import { PollScheduler } from "./poll/PollScheduler";
 import { PrSidebarViewProvider, type FilesLayout, type IFileNode, type ISidebarActions } from "./tree/PrSidebarViewProvider";
 import { PR_URI_SCHEME } from "./review/prUri";
 import { ReviewDecisionTracker } from "./poll/ReviewDecisionTracker";
-import type { IPrFile, IPrFilePatch, IPullRequest } from "./core/types";
+import { MAX_IMAGE_BYTES, type IPrFile, type IPrFilePatch, type IPullRequest } from "./core/types";
 
 const BRIEF_CACHE_STATE_KEY = "githubControlCenter.briefCache";
 const IMAGE_PIXELATED_STATE_KEY = "githubControlCenter.imageViewer.pixelated";
+const IMAGE_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+const FOCUS_REFRESH_COOLDOWN_MS = 30_000;
 // config sections that feed the poll pipeline: an event touching only ai.* keys skips the poll
 const NON_AI_SECTIONS = ["badge", "notifications", "mutedRepos", "toReview", "updateBranch", "files"].map(
   (section) => `githubControlCenter.${section}`,
@@ -75,6 +80,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("GitHub Control Center");
   const fileListCache = new AsyncOidCache<IPrFile[]>();
   const patchCache = new AsyncOidCache<Map<string, IPrFilePatch>>();
+  const imageBytesCache = new BoundedAsyncCache<IFileBytes>({
+    maxBytes: IMAGE_CACHE_MAX_BYTES,
+    maxEntryBytes: MAX_IMAGE_BYTES,
+    sizeOf: (file) => file.bytes.byteLength,
+  });
+
+  function loadFileBytes(token: string, repo: string, path: string, ref: string): Promise<IFileBytes> {
+    // Only commit-SHA refs are immutable; branch/tag refs deduplicate in-flight loads without persisting
+    const persist = FULL_SHA_PATTERN.test(ref);
+    return imageBytesCache.load(`${repo}\0${ref}\0${path}`, () => fetchFileBytes(token, repo, path, ref), { persist });
+  }
 
   async function requireToken(): Promise<string> {
     const session = await getSession(false);
@@ -156,7 +172,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void vscode.window.showInformationMessage(vscode.l10n.t("Review submitted on {0}#{1}", pr.repo, pr.number));
       await reviewController.reload(pr);
-      void refresh();
+      void refresh({ force: true });
     } catch (error) {
       void vscode.window.showErrorMessage(vscode.l10n.t("Submitting the review failed: {0}", toErrorMessage(error)));
     }
@@ -269,7 +285,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const imagePreview = new PrImagePreview(
-    async ({ repo, path, sha }) => fetchFileBytes(await requireToken(), repo, path, sha),
+    async ({ repo, path, sha }) => loadFileBytes(await requireToken(), repo, path, sha),
     createImageViewerStrings,
     { get: getImagePixelated, set: setImagePixelated },
     viewerLanguage,
@@ -283,9 +299,17 @@ export function activate(context: vscode.ExtensionContext): void {
       reviewController.ensureThreadsForPr(pr).catch((error: unknown) => {
         output.appendLine(`[${new Date().toISOString()}] Review threads load failed: ${toDiagnosticMessage(error)}`);
       });
-      // patches must arrive before the URIs: renames need previous_filename for the LEFT path
-      const patches = await ensurePatches(pr);
-      const previousPath = patches.get(file.path)?.previousPath;
+      let previousPath: string | undefined;
+      if (file.changeType === "RENAMED" || file.changeType === "COPIED") {
+        // renames/copies need previous_filename for the LEFT path before building the URIs
+        const patches = await ensurePatches(pr);
+        previousPath = patches.get(file.path)?.previousPath;
+      } else {
+        // warm patches in the background for commenting ranges without blocking the initial open
+        ensurePatches(pr).catch((error: unknown) => {
+          output.appendLine(`[${new Date().toISOString()}] PR patches load failed: ${toDiagnosticMessage(error)}`);
+        });
+      }
       const shared = { prId: pr.id, repo: pr.repo, prNumber: pr.number, headOid: pr.headRefOid };
       const left = {
         ...shared,
@@ -541,7 +565,7 @@ export function activate(context: vscode.ExtensionContext): void {
     panel: detailsPanel,
     getSession,
     fetchPrDetails,
-    fetchFileBytes,
+    fetchFileBytes: loadFileBytes,
     loadPrFiles,
     ensurePatches,
     briefStore,
@@ -568,7 +592,7 @@ export function activate(context: vscode.ExtensionContext): void {
     updatePrBranch,
     checkout: checkoutBranch,
     recordApproval: (prId, headRefOid) => approvalOverlay.record(prId, headRefOid),
-    refresh,
+    refresh: () => refresh({ force: true }),
     notify: {
       info: (message) => void vscode.window.showInformationMessage(message),
       warning: (message) => void vscode.window.showWarningMessage(message),
@@ -623,7 +647,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  async function refresh(): Promise<void> {
+  let lastSuccessfulRefreshAt: number | undefined;
+  let refreshInFlight: Promise<void> | undefined;
+  let refreshQueued = false;
+
+  async function runRefreshPass(): Promise<void> {
     const session = await getSession(false);
     await vscode.commands.executeCommand("setContext", "githubControlCenter.signedIn", Boolean(session));
     if (!session) {
@@ -631,6 +659,8 @@ export function activate(context: vscode.ExtensionContext): void {
       reviewedProvider.clear();
       mineProvider.clear();
       toReviewProvider.setBadge(undefined);
+      detailsSession.clearDetailsCache();
+      lastSuccessfulRefreshAt = undefined;
       return;
     }
     try {
@@ -670,6 +700,7 @@ export function activate(context: vscode.ExtensionContext): void {
       notifyNewPrs(visibleSnapshot.toReview, notificationsEnabled);
       notifyReviewDecisions(visibleSnapshot.mine, notificationsEnabled);
       pollScheduler.recordSuccess();
+      lastSuccessfulRefreshAt = Date.now();
     } catch (error) {
       // poll failures stay silent: keep the last good data, no error toast every 2.5 minutes
       output.appendLine(`[${new Date().toISOString()}] Poll failed: ${toDiagnosticMessage(error)}`);
@@ -679,21 +710,45 @@ export function activate(context: vscode.ExtensionContext): void {
     void detailsSession.refreshOpenDetails();
   }
 
+  function refresh(options?: { force?: boolean }): Promise<void> {
+    if (refreshInFlight) {
+      if (options?.force) {
+        refreshQueued = true;
+      }
+      return refreshInFlight;
+    }
+    refreshInFlight = (async () => {
+      try {
+        do {
+          refreshQueued = false;
+          await runRefreshPass();
+        } while (refreshQueued);
+      } finally {
+        refreshQueued = false;
+        refreshInFlight = undefined;
+      }
+    })();
+    return refreshInFlight;
+  }
+
   // cadence is dynamic (backoff + focus pause), so a self-rescheduling setTimeout replaces a fixed setInterval
   const pollScheduler = new PollScheduler();
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
   // the window starts unfocused on some platforms/session-restore paths; the initial poll below
   // always runs once regardless, this only gates the recurring cadence
   let pollPaused = !vscode.window.state.focused;
 
   function scheduleNextPoll(): void {
-    if (pollPaused) {
+    clearTimeout(pollTimer);
+    if (pollPaused || disposed) {
       return;
     }
     pollTimer = setTimeout(() => void pollCycle(), pollScheduler.nextDelay());
   }
 
   async function pollCycle(): Promise<void> {
+    clearTimeout(pollTimer);
     await refresh();
     scheduleNextPoll();
   }
@@ -703,19 +758,31 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider("githubControlCenter.reviewed", reviewedProvider, sidebarViewOptions),
     vscode.window.registerWebviewViewProvider("githubControlCenter.mine", mineProvider, sidebarViewOptions),
     output,
-    { dispose: () => clearTimeout(pollTimer) },
+    {
+      dispose: () => {
+        disposed = true;
+        clearTimeout(pollTimer);
+      },
+    },
     { dispose: () => detailsSession.dispose() },
     vscode.window.onDidChangeWindowState((windowState) => {
       pollPaused = !windowState.focused;
       clearTimeout(pollTimer);
-      if (windowState.focused) {
-        void pollCycle(); // immediate catch-up refresh, then resumes the normal cadence
+      if (!windowState.focused) {
+        return;
       }
+      const withinCooldown =
+        lastSuccessfulRefreshAt !== undefined && Date.now() - lastSuccessfulRefreshAt < FOCUS_REFRESH_COOLDOWN_MS;
+      if (withinCooldown) {
+        scheduleNextPoll();
+        return;
+      }
+      void pollCycle(); // catch-up refresh after cooldown (or if no refresh succeeded yet), then resumes normal cadence
     }),
-    vscode.commands.registerCommand("githubControlCenter.refresh", () => void refresh()),
+    vscode.commands.registerCommand("githubControlCenter.refresh", () => void refresh({ force: true })),
     vscode.commands.registerCommand("githubControlCenter.signIn", async () => {
       await getSession(true);
-      await refresh();
+      await refresh({ force: true });
     }),
     vscode.commands.registerCommand("githubControlCenter.openPr", openPr),
     vscode.commands.registerCommand("githubControlCenter.openSettings", () => void vscode.commands.executeCommand("workbench.action.openSettings", "@ext:mts88.github-control-center")),
@@ -801,7 +868,7 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => detailsPanel.dispose() },
     vscode.authentication.onDidChangeSessions((event) => {
       if (event.provider.id === "github") {
-        void refresh();
+        void refresh({ force: true });
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -828,7 +895,7 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const provider of sidebarProviders) {
         provider.refresh();
       }
-      void refresh();
+      void refresh({ force: true });
     }),
   );
 

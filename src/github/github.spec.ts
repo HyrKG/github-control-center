@@ -271,10 +271,20 @@ describe("fetchPullRequests", () => {
     });
   });
 
-  it("should throw when the HTTP response is not ok", async () => {
-    stubFetch({}, 401);
+  it("should throw when the HTTP response is not ok and cancel the error body stream", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      body: { cancel },
+      json: async () => ({}),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(fetchPullRequests("token")).rejects.toThrow("401");
+    expect(cancel).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("should throw the first GraphQL error message", async () => {

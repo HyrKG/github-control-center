@@ -64,6 +64,8 @@ const REVIEW_GLYPHS: Record<string, { glyph: string; tone: ReviewTone }> = {
 export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private webviewReady = false;
+  private pendingStateSync = false;
+  private lastPostedSnapshotJson: string | undefined;
   private pendingBadge: vscode.ViewBadge | undefined;
   private signedIn = false;
   private prs: IPullRequest[] = [];
@@ -80,6 +82,8 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
     this.webviewReady = false;
+    this.pendingStateSync = false;
+    this.lastPostedSnapshotJson = undefined;
     webviewView.badge = this.pendingBadge;
     webviewView.webview.options = {
       enableScripts: true,
@@ -91,10 +95,17 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((raw: unknown) => {
       void this.handleMessage(raw as SidebarWebviewMessage | null);
     });
+    webviewView.onDidChangeVisibility?.(() => {
+      if (this.view === webviewView && webviewView.visible && this.pendingStateSync) {
+        this.postState();
+      }
+    });
     webviewView.onDidDispose(() => {
       if (this.view === webviewView) {
         this.view = undefined;
         this.webviewReady = false;
+        this.pendingStateSync = false;
+        this.lastPostedSnapshotJson = undefined;
       }
     });
   }
@@ -174,7 +185,18 @@ export class PrSidebarViewProvider implements vscode.WebviewViewProvider {
     if (!this.view || !this.webviewReady) {
       return;
     }
-    void this.view.webview.postMessage({ command: "state", snapshot: this.buildSnapshot() });
+    if (this.view.visible === false) {
+      this.pendingStateSync = true;
+      return;
+    }
+    this.pendingStateSync = false;
+    const snapshot = this.buildSnapshot();
+    const snapshotJson = JSON.stringify(snapshot);
+    if (snapshotJson === this.lastPostedSnapshotJson) {
+      return;
+    }
+    this.lastPostedSnapshotJson = snapshotJson;
+    void this.view.webview.postMessage({ command: "state", snapshot });
   }
 
   private async handleMessage(message: SidebarWebviewMessage | null): Promise<void> {

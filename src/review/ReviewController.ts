@@ -4,7 +4,7 @@ import { fetchReviewThreads } from "../github/github";
 import { gitHubFileRoot } from "../github/fileUrls";
 import { fromPrUri, toPrUri } from "./PrContentProvider";
 import { PR_URI_SCHEME } from "./prUri";
-import { threadStatus, toThreadAnchor } from "./reviewThreads";
+import { threadStatus, toThreadAnchor, type IThreadAnchor } from "./reviewThreads";
 import { syncThreads } from "./threadSync";
 import type { IPrFilePatch, IPullRequest, IReviewThread, IReviewThreadsSnapshot } from "../core/types";
 
@@ -109,12 +109,24 @@ export class ReviewController implements vscode.Disposable {
         state.vsThreads.delete(threadId);
       }
     }
-    for (const thread of plan.create) {
-      const vsThread = await this.materializeThread(pr, thread);
-      if (vsThread) {
-        state.vsThreads.set(thread.id, vsThread);
-        this.threadRefs.set(vsThread, { prId: pr.id, threadId: thread.id });
+    const prepared = await Promise.all(
+      plan.create.map(async (thread) => {
+        const anchor = toThreadAnchor(thread);
+        if (!anchor) {
+          return undefined;
+        }
+        // LEFT-side threads on renamed files live at the old path in the diff editor
+        const patch = anchor.side === "LEFT" ? await this.deps.getPatch(pr, thread.path) : undefined;
+        return { thread, anchor, patch };
+      }),
+    );
+    for (const item of prepared) {
+      if (!item) {
+        continue;
       }
+      const vsThread = this.materializeThread(pr, item.thread, item.anchor, item.patch);
+      state.vsThreads.set(item.thread.id, vsThread);
+      this.threadRefs.set(vsThread, { prId: pr.id, threadId: item.thread.id });
     }
     for (const thread of plan.update) {
       const vsThread = state.vsThreads.get(thread.id);
@@ -134,13 +146,12 @@ export class ReviewController implements vscode.Disposable {
     this.deps.onPendingChanged(count > 0 || snapshot?.pendingReviewId ? pr : undefined, count);
   }
 
-  private async materializeThread(pr: IPullRequest, thread: IReviewThread): Promise<vscode.CommentThread | undefined> {
-    const anchor = toThreadAnchor(thread);
-    if (!anchor) {
-      return undefined;
-    }
-    // LEFT-side threads on renamed files live at the old path in the diff editor
-    const patch = anchor.side === "LEFT" ? await this.deps.getPatch(pr, thread.path) : undefined;
+  private materializeThread(
+    pr: IPullRequest,
+    thread: IReviewThread,
+    anchor: IThreadAnchor,
+    patch: IPrFilePatch | undefined,
+  ): vscode.CommentThread {
     const uri = toPrUri({
       prId: pr.id,
       repo: pr.repo,

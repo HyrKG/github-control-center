@@ -39,19 +39,26 @@ const host = vi.hoisted(() => {
   const registered = new Map<string, (...args: unknown[]) => unknown>();
   const webviewViewProviders = new Map<string, vscode.WebviewViewProvider>();
   const statusBar = { ...subscription, hide: vi.fn(), show: vi.fn(), text: "", tooltip: "" };
+  const outputLines: string[] = [];
   const webviewPanels: IMockWebviewPanel[] = [];
   const globalStateStore = new Map<string, unknown>();
   const clipboardWriteText = vi.fn();
+  let onWindowStateChange: ((state: { focused: boolean }) => void) | undefined;
 
   return {
     registered,
     webviewViewProviders,
     statusBar,
+    outputLines,
     webviewPanels,
     globalStateStore,
     clipboardWriteText,
     external: vi.fn(),
     createCommentThread: vi.fn(() => ({ ...subscription })),
+    emitWindowState: (focused: boolean) => {
+      host.window.state.focused = focused;
+      onWindowStateChange?.({ focused });
+    },
     commands: {
       registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
         registered.set(id, handler);
@@ -66,7 +73,7 @@ const host = vi.hoisted(() => {
     },
     window: {
       state: { focused: false },
-      createOutputChannel: () => ({ ...subscription, appendLine: vi.fn() }),
+      createOutputChannel: () => ({ ...subscription, appendLine: vi.fn((line: string) => outputLines.push(line)) }),
       createStatusBarItem: () => statusBar,
       registerWebviewViewProvider: vi.fn((viewId: string, provider: vscode.WebviewViewProvider) => {
         webviewViewProviders.set(viewId, provider);
@@ -99,9 +106,13 @@ const host = vi.hoisted(() => {
         webviewPanels.push(panel);
         return panel;
       }),
-      onDidChangeWindowState: () => subscription,
+      onDidChangeWindowState: (cb: (state: { focused: boolean }) => void) => {
+        onWindowStateChange = cb;
+        return subscription;
+      },
       showInformationMessage: vi.fn<(message: string, ...actions: string[]) => Promise<string | undefined>>().mockResolvedValue(undefined),
       showWarningMessage: vi.fn<(message: string, options: unknown, action: string) => Promise<string | undefined>>().mockResolvedValue(undefined),
+      showErrorMessage: vi.fn<(message: string) => Promise<string | undefined>>().mockResolvedValue(undefined),
       showQuickPick: vi.fn<(items: readonly vscode.QuickPickItem[]) => Promise<vscode.QuickPickItem | undefined>>(),
       showInputBox: vi.fn().mockResolvedValue("review summary"),
     },
@@ -191,9 +202,12 @@ describe("localized extension actions", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     host.webviewPanels.length = 0;
+    host.outputLines.length = 0;
+    host.window.state.focused = false;
     host.globalStateStore.clear();
     setTestLocale("zh-cn", chineseBundle());
     vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+    vi.mocked(github.fetchPrFilePatches).mockResolvedValue([]);
     vi.mocked(github.fetchReviewThreads).mockResolvedValue(snapshot);
     activate({
       subscriptions,
@@ -421,5 +435,230 @@ describe("localized extension actions", () => {
         { preview: true },
       );
     });
+  });
+
+  it("opens non-renamed diffs without awaiting patches, logs background patch errors, and awaits patches for renames", async () => {
+    let rejectPatches!: (error: Error) => void;
+    vi.mocked(github.fetchPrFilePatches).mockImplementationOnce(
+      () => new Promise((_, reject) => { rejectPatches = reject; }),
+    );
+    host.commands.executeCommand.mockClear();
+
+    // MODIFIED file opens vscode.diff immediately even though fetchPrFilePatches has not settled
+    await runCommand("openFileDiff", {
+      pr,
+      file: { path: "src/fast.ts", changeType: "MODIFIED", additions: 1, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    expect(host.commands.executeCommand).toHaveBeenCalledWith(
+      "vscode.diff",
+      expect.objectContaining({ scheme: "ghcc-pr", path: "/src/fast.ts" }),
+      expect.objectContaining({ scheme: "ghcc-pr", path: "/src/fast.ts" }),
+      "fast.ts（拉取请求 #42）",
+      { preview: true },
+    );
+
+    // Background patch warm-up failure lands in output channel, not an error toast
+    rejectPatches(new Error("patch timeout"));
+    await vi.waitFor(() => expect(host.outputLines.some((line) => line.includes("patch timeout"))).toBe(true));
+    expect(host.window.showErrorMessage).not.toHaveBeenCalled();
+
+    // RENAMED file awaits patches to populate previousPath on the LEFT URI
+    let resolveRenamePatches!: (patches: Array<{ path: string; previousPath?: string }>) => void;
+    vi.mocked(github.fetchPrFilePatches).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveRenamePatches = resolve; }),
+    );
+    host.commands.executeCommand.mockClear();
+    const renamedPr = { ...pr, id: "p-renamed", headRefOid: "head-renamed" };
+    const openRenamed = runCommand("openFileDiff", {
+      pr: renamedPr,
+      file: { path: "src/new-name.ts", changeType: "RENAMED", additions: 1, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(host.commands.executeCommand).not.toHaveBeenCalledWith("vscode.diff", expect.anything(), expect.anything(), expect.anything(), expect.anything());
+
+    resolveRenamePatches([{ path: "src/new-name.ts", previousPath: "src/old-name.ts" }]);
+    await openRenamed;
+    await vi.waitFor(() => {
+      expect(host.commands.executeCommand).toHaveBeenCalledWith(
+        "vscode.diff",
+        expect.objectContaining({ scheme: "ghcc-pr", path: "/src/old-name.ts" }),
+        expect.objectContaining({ scheme: "ghcc-pr", path: "/src/new-name.ts" }),
+        "new-name.ts（拉取请求 #42）",
+        { preview: true },
+      );
+    });
+  });
+
+  it("shares LRU image bytes across preview and details for 40-char SHAs while avoiding stale persistence for branch refs", async () => {
+    const headSha = "a".repeat(40);
+    const baseSha = "b".repeat(40);
+    const shaPr: IPullRequest = { ...pr, id: "p-sha", baseRefOid: baseSha, headRefOid: headSha };
+    vi.mocked(github.fetchPrDetails).mockResolvedValue({
+      number: shaPr.number,
+      title: shaPr.title,
+      url: shaPr.url,
+      repo: shaPr.repo,
+      author: shaPr.author,
+      authorAvatarUrl: "",
+      state: "OPEN",
+      isDraft: false,
+      createdAt: shaPr.createdAt,
+      bodyHtml: "<p>Image test</p>",
+      baseRefName: "main",
+      headRefName: shaPr.headRefName,
+      headRepo: shaPr.repo,
+      headRefOid: headSha,
+      isBehindBase: false,
+      commitsCount: 1,
+      changedFiles: 1,
+      additions: 1,
+      deletions: 0,
+      labels: [],
+      mergeable: "MERGEABLE",
+      mergeMethods: ["SQUASH"],
+      reviewDecision: null,
+      viewerDidAuthor: false,
+      canApprove: true,
+      pendingReviewCommentCount: null,
+      reviewers: [],
+      checks: [],
+      checksTotal: 0,
+      timeline: [],
+      timelineTruncated: false,
+    });
+    vi.mocked(github.fetchFileBytes).mockResolvedValue({
+      bytes: Uint8Array.of(0x89, 0x50, 0x4e, 0x47),
+      contentType: "image/png",
+    });
+
+    // Open ADDED image in PrImagePreview (caches headSha entry)
+    await runCommand("openFileDiff", {
+      pr: shaPr,
+      file: { path: "docs/logo.png", changeType: "ADDED", additions: 0, deletions: 0, viewedState: "UNVIEWED" },
+      kind: "file",
+    });
+    await vi.waitFor(() => expect(github.fetchFileBytes).toHaveBeenCalledTimes(1));
+
+    // Open PR details and resolve the exact same repo/SHA/path image -> hits shared cache!
+    await runCommand("openPrDetails", shaPr);
+    const detailsPanel = host.webviewPanels.find((panel) => panel.viewType === "githubControlCenter.prDetails")!;
+    detailsPanel.webview.postMessage.mockClear();
+    detailsPanel.webview.emitMessage({
+      command: "resolveImage",
+      requestId: "req-sha",
+      src: `https://github.com/${shaPr.repo}/blob/${headSha}/docs/logo.png`,
+    });
+    await vi.waitFor(() => expect(detailsPanel.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      command: "imageResolved",
+      requestId: "req-sha",
+      dataUri: expect.stringContaining("data:image/png;base64,"),
+    })));
+    expect(github.fetchFileBytes).toHaveBeenCalledTimes(1);
+
+    // Non-SHA branch ref must NOT persist across sequential calls (prevents stale images after push)
+    vi.mocked(github.fetchFileBytes).mockClear();
+    detailsPanel.webview.postMessage.mockClear();
+    const branchUrl = `https://github.com/${shaPr.repo}/blob/main/docs/logo.png`;
+    detailsPanel.webview.emitMessage({ command: "resolveImage", requestId: "req-branch-1", src: branchUrl });
+    await vi.waitFor(() => expect(detailsPanel.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: "req-branch-1" })));
+    detailsPanel.webview.emitMessage({ command: "resolveImage", requestId: "req-branch-2", src: branchUrl });
+    await vi.waitFor(() => expect(detailsPanel.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: "req-branch-2" })));
+    expect(github.fetchFileBytes).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent refreshes and runs at most one follow-up pass for forced refreshes", async () => {
+    let resolveFirst!: (snapshot: { toReview: IPullRequest[]; mine: IPullRequest[]; reviewed: IPullRequest[] }) => void;
+    vi.mocked(github.fetchPullRequests)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+
+    // Start one refresh (in-flight), then trigger multiple forced manual refreshes while it runs
+    void runCommand("refresh");
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(1));
+
+    void runCommand("refresh");
+    void runCommand("refresh");
+    void runCommand("refresh");
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ toReview: [], mine: [], reviewed: [] });
+    await vi.waitFor(() => expect(github.fetchPullRequests).toHaveBeenCalledTimes(2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Multiple forced calls while in-flight coalesced into exactly one follow-up pass
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("window focus cooldown", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    host.webviewPanels.length = 0;
+    host.outputLines.length = 0;
+    host.window.state.focused = true;
+    host.globalStateStore.clear();
+    vi.mocked(github.fetchPullRequests).mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+    vi.mocked(github.fetchPrFilePatches).mockResolvedValue([]);
+    vi.mocked(github.fetchReviewThreads).mockResolvedValue(snapshot);
+  });
+
+  afterEach(() => {
+    subscriptions.splice(0).forEach((subscription) => subscription.dispose());
+    host.registered.clear();
+    host.webviewViewProviders.clear();
+    vi.useRealTimers();
+  });
+
+  function activateFresh(): void {
+    activate({
+      subscriptions,
+      extensionUri: { scheme: "file", path: "/ext", toString: () => "/ext" },
+      globalState: {
+        get: <T>(key: string, fallback?: T) => (host.globalStateStore.has(key) ? host.globalStateStore.get(key) : fallback),
+        update: vi.fn(async (key: string, value: unknown) => {
+          host.globalStateStore.set(key, value);
+        }),
+      },
+    } as unknown as vscode.ExtensionContext);
+  }
+
+  it("skips immediate fetch on focus within 30s of a successful refresh and fetches once cooldown elapses", async () => {
+    activateFresh();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(1);
+
+    // Blur and refocus after 10s (< 30s cooldown) -> no immediate refresh
+    host.emitWindowState(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    host.emitWindowState(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(1);
+
+    // Blur and refocus after another 25s (total 35s >= 30s cooldown) -> immediate catch-up refresh
+    host.emitWindowState(false);
+    await vi.advanceTimersByTimeAsync(25_000);
+    host.emitWindowState(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches immediately on focus when no refresh has succeeded yet", async () => {
+    vi.mocked(github.fetchPullRequests)
+      .mockRejectedValueOnce(new Error("initial network failure"))
+      .mockResolvedValue({ toReview: [], mine: [], reviewed: [] });
+
+    activateFresh();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(1);
+
+    // Refocus after 5s — initial refresh failed so cooldown does not apply
+    host.emitWindowState(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    host.emitWindowState(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(github.fetchPullRequests).toHaveBeenCalledTimes(2);
   });
 });

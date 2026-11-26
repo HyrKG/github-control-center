@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
+import { BoundedAsyncCache } from "../core/BoundedAsyncCache";
 import { decodePrUriParts, encodePrUriParts, PR_URI_SCHEME, type IPrFileRef } from "./prUri";
 
-// ponytail: memory ceiling — sha-pinned content is immutable so small files cache forever,
-// bodies above this stay uncached and re-fetch on each render
+// ponytail: memory ceiling — sha-pinned content is immutable so small files cache within the
+// LRU byte budget; bodies above the per-entry cap stay uncached and re-fetch on each render
 const MAX_CACHED_BODY_BYTES = 1_048_576;
+const MAX_CONTENT_CACHE_BYTES = 32 * 1024 * 1024;
 
 export function toPrUri(ref: IPrFileRef): vscode.Uri {
   const { path, query } = encodePrUriParts(ref);
@@ -15,9 +17,18 @@ export function fromPrUri(uri: vscode.Uri): IPrFileRef {
 }
 
 export class PrContentProvider implements vscode.TextDocumentContentProvider {
-  private readonly cache = new Map<string, string>();
+  private readonly cache: BoundedAsyncCache<string>;
 
-  constructor(private readonly fetchContent: (ref: IPrFileRef) => Promise<string>) {}
+  constructor(
+    private readonly fetchContent: (ref: IPrFileRef) => Promise<string>,
+    maxCacheBytes = MAX_CONTENT_CACHE_BYTES,
+  ) {
+    this.cache = new BoundedAsyncCache<string>({
+      maxBytes: maxCacheBytes,
+      maxEntryBytes: MAX_CACHED_BODY_BYTES,
+      sizeOf: (content) => Buffer.byteLength(content, "utf8"),
+    });
+  }
 
   // fetch errors intentionally propagate: opening a diff is user-initiated,
   // so the editor surfaces the failure (unlike the silent poll loop)
@@ -26,15 +37,6 @@ export class PrContentProvider implements vscode.TextDocumentContentProvider {
     if (ref.isEmpty) {
       return "";
     }
-    const key = uri.toString();
-    const cached = this.cache.get(key);
-    if (cached !== undefined) {
-      return cached;
-    }
-    const content = await this.fetchContent(ref);
-    if (content.length <= MAX_CACHED_BODY_BYTES) {
-      this.cache.set(key, content);
-    }
-    return content;
+    return this.cache.load(uri.toString(), () => this.fetchContent(ref));
   }
 }
