@@ -1475,6 +1475,40 @@ const SIDEBAR_SCRIPT = `
     return row;
   }
 
+  function parseSearchGroups(raw) {
+    if (typeof raw !== "string") { return []; }
+    var branches = raw.toLowerCase().split("|");
+    var groups = [];
+    for (var i = 0; i < branches.length; i++) {
+      var trimmed = branches[i].trim();
+      if (!trimmed) { continue; }
+      var terms = trimmed.split(/\\s+/);
+      if (terms.length > 0) {
+        groups.push(terms);
+      }
+    }
+    return groups;
+  }
+
+  function matchesSearchGroups(title, groups) {
+    if (!groups || groups.length === 0) { return true; }
+    var lowerTitle = (title || "").toLowerCase();
+    for (var i = 0; i < groups.length; i++) {
+      var terms = groups[i];
+      var allMatch = true;
+      for (var j = 0; j < terms.length; j++) {
+        if (lowerTitle.indexOf(terms[j]) === -1) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function clearSearch(focusInput) {
     searchQuery = "";
     if (searchInput) {
@@ -1497,9 +1531,10 @@ const SIDEBAR_SCRIPT = `
     searchInput.type = "text";
     searchInput.className = "search-input";
     searchInput.setAttribute("id", "search-input");
-    var placeholder = strings.searchPlaceholder || "Filter by PR title…";
+    var placeholder = strings.searchPlaceholder || "Filter PR title (space: AND, |: OR)…";
     searchInput.setAttribute("placeholder", placeholder);
     searchInput.setAttribute("aria-label", placeholder);
+    searchInput.setAttribute("title", placeholder);
     searchInput.setAttribute("autocomplete", "off");
     searchInput.setAttribute("spellcheck", "false");
     searchInput.value = searchQuery;
@@ -1573,8 +1608,8 @@ const SIDEBAR_SCRIPT = `
       return;
     }
 
-    var query = searchQuery.trim().toLowerCase();
-    var isSearching = query.length > 0;
+    var searchGroups = parseSearchGroups(searchQuery);
+    var isSearching = searchGroups.length > 0;
 
     if (!hasGroups) {
       var emptyWrap = document.createElement("div");
@@ -1591,7 +1626,7 @@ const SIDEBAR_SCRIPT = `
       var rawGroup = snapshot.groups[g];
       var matchedPrs = isSearching
         ? rawGroup.prs.filter(function (pr) {
-            return (pr.title || "").toLowerCase().indexOf(query) !== -1;
+            return matchesSearchGroups(pr.title, searchGroups);
           })
         : rawGroup.prs;
       if (matchedPrs.length > 0) {
@@ -1794,7 +1829,7 @@ const SIDEBAR_SCRIPT = `
 
     var rows = Array.prototype.slice.call(treeRoot.querySelectorAll("[data-row-id]"));
     if (rows.length === 0) { return; }
-    var isSearching = searchQuery.trim().length > 0;
+    var isSearching = parseSearchGroups(searchQuery).length > 0;
     var currentIndex = rows.indexOf(active);
     if (currentIndex === -1) {
       for (var i = 0; i < rows.length; i++) {
