@@ -25,7 +25,7 @@ const DEFAULT_STRINGS: ISidebarClientStrings = {
   expandPr: "Toggle changed files",
   expandRepo: "Toggle repository",
   expandFolder: "Toggle folder",
-  searchPlaceholder: "Filter by PR title…",
+  searchPlaceholder: "Filter PR title (space: AND, |: OR)…",
   clearSearch: "Clear search",
   noMatchingPrs: "No matching pull requests",
   favoriteRepo: "Favorite repository",
@@ -906,8 +906,9 @@ describe("sidebar webview runtime (node:vm)", () => {
     const initialInput = vm.mockDocument.getElementById("search-input")!;
     const clearBtn = vm.mockDocument.getElementById("search-clear")!;
     expect(initialInput).not.toBeNull();
-    expect(initialInput.getAttribute("placeholder")).toBe("Filter by PR title…");
-    expect(initialInput.getAttribute("aria-label")).toBe("Filter by PR title…");
+    expect(initialInput.getAttribute("placeholder")).toBe("Filter PR title (space: AND, |: OR)…");
+    expect(initialInput.getAttribute("aria-label")).toBe("Filter PR title (space: AND, |: OR)…");
+    expect(initialInput.getAttribute("title")).toBe("Filter PR title (space: AND, |: OR)…");
     expect(clearBtn.classList.contains("is-hidden")).toBe(true);
 
     // Ctrl+F focuses and selects the search input
@@ -968,6 +969,172 @@ describe("sidebar webview runtime (node:vm)", () => {
     expect(vm.mockDocument.searchBar.classList.contains("is-hidden")).toBe(true);
     const hiddenEsc = vm.mockDocument.emitKeydown("Escape");
     expect(hiddenEsc.defaultPrevented).toBe(false);
+  });
+
+  it("supports multi-keyword PR title search (space = AND, | = OR) with strict title-only matching and separator-only edge cases", () => {
+    const snap: ISidebarSnapshot = {
+      signedIn: true,
+      layout: "tree",
+      groups: [
+        {
+          repo: "org/alpha-service",
+          favorite: false,
+          prs: [
+            {
+              id: "PR_9",
+              number: 9,
+              title: "feat(combat): 打击反馈 (#4911)",
+              repo: "org/alpha-service",
+              author: "alice",
+              isDraft: false,
+              ciState: "SUCCESS",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 10,
+              deletions: 2,
+              meta: "alice · opened today",
+              tooltip: "feat(combat)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+            {
+              id: "PR_26",
+              number: 26,
+              title: "fix(auth): refresh expired token",
+              repo: "org/alpha-service",
+              author: "bob",
+              isDraft: false,
+              ciState: "NONE",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 5,
+              deletions: 1,
+              meta: "bob · opened today",
+              tooltip: "fix(auth)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+          ],
+        },
+        {
+          repo: "org/beta-web",
+          favorite: false,
+          prs: [
+            {
+              id: "PR_30",
+              number: 30,
+              title: "feat(api): handle a, b and 中文，测试",
+              repo: "org/beta-web",
+              author: "charlie",
+              isDraft: false,
+              ciState: "PENDING",
+              reviewGlyph: null,
+              reviewTone: null,
+              additions: 20,
+              deletions: 3,
+              meta: "charlie · opened today",
+              tooltip: "feat(api)",
+              expanded: false,
+              filesState: { status: "idle" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const vm = bootSidebarVm(snap, { collapsedRepos: ["org/alpha-service"] });
+    const searchInput = vm.mockDocument.getElementById("search-input")!;
+    const clearBtn = vm.mockDocument.getElementById("search-clear")!;
+
+    const matchedPrIds = () =>
+      vm.mockDocument.treeRoot.querySelectorAll(".pr-row").map((el) => el.getAttribute("data-pr-id"));
+    const repoCounts = () =>
+      vm.mockDocument.treeRoot.querySelectorAll(".repo-row").map((el) => [
+        el.getAttribute("data-repo"),
+        el.findAll((child) => child.classList.contains("repo-count"))[0].textContent,
+      ]);
+
+    // 1. Space = AND (order-independent); missing any term does not match
+    searchInput.input("打击 FEAT");
+    expect(matchedPrIds()).toEqual(["PR_9"]);
+    searchInput.input("feat   token");
+    expect(matchedPrIds()).toEqual([]);
+    expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+
+    // 2. | = OR (with or without spaces) matches multiple PRs and updates repo badge counts
+    searchInput.input("#4911 | token");
+    expect(matchedPrIds()).toEqual(["PR_9", "PR_26"]);
+    expect(repoCounts()).toEqual([["org/alpha-service", "2"]]);
+
+    searchInput.input("#4911|中文，测试");
+    expect(matchedPrIds()).toEqual(["PR_9", "PR_30"]);
+    expect(repoCounts()).toEqual([
+      ["org/alpha-service", "1"],
+      ["org/beta-web", "1"],
+    ]);
+
+    // 3. Combined AND + OR precedence: (a AND b) OR (c AND d)
+    searchInput.input("feat 打击 | fix token");
+    expect(matchedPrIds()).toEqual(["PR_9", "PR_26"]);
+    searchInput.input("feat missing | fix token");
+    expect(matchedPrIds()).toEqual(["PR_26"]);
+
+    // 4. Commas (ASCII ',' and Chinese '，') and semicolons ';' are literal characters, NOT OR separators
+    searchInput.input("a, b");
+    expect(matchedPrIds()).toEqual(["PR_30"]);
+    searchInput.input("中文，测试");
+    expect(matchedPrIds()).toEqual(["PR_30"]);
+    for (const nonOrQuery of ["#4911, token", "#4911，token", "#4911;token"]) {
+      searchInput.input(nonOrQuery);
+      expect(matchedPrIds(), nonOrQuery).toEqual([]);
+    }
+
+    // 5. Trailing dangling '|' keeps matching the populated branch without flicker
+    searchInput.input("#4911 | ");
+    expect(matchedPrIds()).toEqual(["PR_9"]);
+
+    // 6. Separator-only or whitespace-only query is treated as inactive search (isSearching = false):
+    //    collapsed repos stay collapsed, expanded repos can collapse via ArrowLeft, no false "No matching pull requests",
+    //    and clear button remains visible and clears via Escape or click
+    for (const emptySyntaxQuery of [" | | ", "   "]) {
+      searchInput.input(emptySyntaxQuery);
+      expect(clearBtn.classList.contains("is-hidden")).toBe(false);
+      expect(vm.mockDocument.treeRoot.textContent).not.toContain("No matching pull requests");
+      expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")).toHaveLength(2);
+      expect(matchedPrIds()).toEqual(["PR_30"]); // org/alpha-service remains collapsed
+
+      // ArrowLeft on expanded org/beta-web still collapses it when query is separator-only
+      const betaRepoRow = vm.mockDocument.treeRoot.querySelectorAll(".repo-row")[1];
+      betaRepoRow.focus();
+      vm.mockDocument.emitKeydown("ArrowLeft");
+      expect(matchedPrIds()).toEqual([]);
+      expect(vm.mockDocument.treeRoot.querySelectorAll(".repo-row")).toHaveLength(2);
+      // Expand org/beta-web back for next iteration
+      vm.mockDocument.treeRoot.querySelectorAll(".repo-row")[1].focus();
+      vm.mockDocument.emitKeydown("ArrowRight");
+      expect(matchedPrIds()).toEqual(["PR_30"]);
+    }
+
+    // Escape clears separator-only query and hides clear button
+    searchInput.input(" | | ");
+    const esc = vm.mockDocument.emitKeydown("Escape");
+    expect(esc.defaultPrevented).toBe(true);
+    expect(searchInput.value).toBe("");
+    expect(clearBtn.classList.contains("is-hidden")).toBe(true);
+
+    // Click clear button also clears separator-only query
+    searchInput.input(" | | ");
+    expect(clearBtn.classList.contains("is-hidden")).toBe(false);
+    clearBtn.click();
+    expect(searchInput.value).toBe("");
+    expect(clearBtn.classList.contains("is-hidden")).toBe(true);
+
+    // 7. Strict title-only matching still ignores GitHub PR #number, repo name, and author name
+    for (const nonTitleMultiQuery of ["#9 | alice", "#26 | #30", "beta-web charlie", "alpha-service bob"]) {
+      searchInput.input(nonTitleMultiQuery);
+      expect(matchedPrIds(), nonTitleMultiQuery).toEqual([]);
+      expect(vm.mockDocument.treeRoot.textContent).toContain("No matching pull requests");
+    }
   });
 
   it("respects IME composition, keeps #search-clear keyboard-activatable, and does not hijack Ctrl/Cmd+Shift+F", () => {
